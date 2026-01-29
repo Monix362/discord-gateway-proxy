@@ -22,7 +22,9 @@ use crate::{
     SHUTDOWN,
 };
 
-pub type BroadcastMessage = (String, Option<SequenceInfo>);
+/// (payload, sequence_info, guild_id)
+/// guild_id is None for events without a guild context (USER_UPDATE, DMs, etc.)
+pub type BroadcastMessage = (String, Option<SequenceInfo>, Option<u64>);
 
 const TEN_SECONDS: Duration = Duration::from_secs(10);
 
@@ -80,7 +82,7 @@ pub async fn events(
             continue;
         };
 
-        let (op, sequence, event_type) = event.into_parts();
+        let (op, sequence, event_type, guild_id) = event.into_parts();
 
         if let Some(EventTypeInfo(event_name, _)) = event_type {
             metrics::counter!("gateway_shard_events", "shard" => shard_id_str.clone(), "event_type" => event_name.to_owned()).increment(1);
@@ -119,7 +121,7 @@ pub async fn events(
                 let payload_copy = payload.clone();
                 trace!("[Shard {shard_id}] Sending payload to clients: {payload_copy:?}",);
 
-                let _res = broadcast_tx.send((payload_copy, sequence));
+                let _res = broadcast_tx.send((payload_copy, sequence, guild_id));
             }
         }
 

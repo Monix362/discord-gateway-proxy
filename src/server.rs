@@ -25,7 +25,7 @@ use tokio::{
 use tokio_websockets::{Error, Limits, Message, ServerBuilder};
 use tracing::{debug, error, info, trace, warn};
 
-use std::{convert::Infallible, future::ready, net::SocketAddr, sync::Arc};
+use std::{collections::HashSet, convert::Infallible, future::ready, net::SocketAddr, sync::Arc};
 
 use crate::{
     config::CONFIG,
@@ -113,12 +113,17 @@ where
     Ok(())
 }
 
+/// Forward events from a shard to a connected client.
+/// 
+/// If `authorized_guilds` is Some, only events for those guilds are forwarded.
+/// If `authorized_guilds` is None, all events are forwarded (original behavior).
 async fn forward_shard(
     session_id: String,
     shard_status: Arc<Shard>,
     stream_writer: UnboundedSender<Message>,
     send_guilds: bool,
     mut seq: usize,
+    authorized_guilds: Option<Arc<HashSet<u64>>>,
 ) {
     let shard_id = shard_status.id;
 
@@ -131,7 +136,7 @@ async fn forward_shard(
         // Get a fake ready payload to send to the client
         let mut ready_payload = shard_status
             .guilds
-            .get_ready_payload(ready_payload, &mut seq);
+            .get_ready_payload(ready_payload, &mut seq, authorized_guilds.as_deref());
 
         // Overwrite the session ID in the READY
         ready_payload
@@ -144,7 +149,8 @@ async fn forward_shard(
         };
 
         // Send GUILD_CREATE/GUILD_DELETEs based on guild availability
-        for payload in shard_status.guilds.get_guild_payloads(&mut seq) {
+        // Filter to only authorized guilds if specified
+        for payload in shard_status.guilds.get_guild_payloads(&mut seq, authorized_guilds.as_deref()) {
             trace!("[Shard {shard_id}] Sending newly created GUILD_CREATE/GUILD_DELETE payload");
             let _res = stream_writer.send(Message::text(payload));
         }
@@ -161,7 +167,24 @@ async fn forward_shard(
     loop {
         let res = event_receiver.recv().await;
 
-        if let Ok((mut payload, sequence)) = res {
+        if let Ok((mut payload, sequence, guild_id)) = res {
+            // Filter by authorized guilds if specified
+            if let Some(ref guilds) = authorized_guilds {
+                match guild_id {
+                    Some(gid) => {
+                        if !guilds.contains(&gid) {
+                            // Event is for a guild this client isn't authorized for
+                            continue;
+                        }
+                    }
+                    None => {
+                        // Event has no guild_id (USER_UPDATE, DMs, etc.)
+                        // Skip these events for multi-tenant clients
+                        continue;
+                    }
+                }
+            }
+
             // Overwrite the sequence number
             if let Some(SequenceInfo(_, sequence_range)) = sequence {
                 seq += 1;
@@ -278,12 +301,16 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                 shard_sender = Some(shard.sender.clone());
 
                 if let Some(sender) = compress_tx.take() {
+                    // TODO: Get authorized_guilds from client authentication
+                    let authorized_guilds: Option<Arc<HashSet<u64>>> = None;
+                    
                     shard_forward_task = Some(tokio::spawn(forward_shard(
                         session_id,
                         shard,
                         stream_writer.clone(),
                         true,
                         0,
+                        authorized_guilds,
                     )));
 
                     let _res = sender.send(identify.d.compress);
@@ -321,12 +348,16 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     let shard = state.shards[session.shard_id as usize].clone();
 
                     if let Some(sender) = compress_tx.take() {
+                        // TODO: Get authorized_guilds from session
+                        let authorized_guilds: Option<Arc<HashSet<u64>>> = None;
+                        
                         shard_forward_task = Some(tokio::spawn(forward_shard(
                             session_id,
                             shard.clone(),
                             stream_writer.clone(),
                             false,
                             resume.d.seq,
+                            authorized_guilds,
                         )));
 
                         let _res = sender.send(session.compress);

@@ -22,6 +22,7 @@ pub struct GatewayEvent<'a> {
     event_type: Option<EventTypeInfo<'a>>,
     op: OpInfo,
     sequence: Option<SequenceInfo>,
+    guild_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,11 +45,13 @@ impl<'a> GatewayEvent<'a> {
         let op = Self::find_opcode(input)?;
         let event_type = Self::find_event_type(input);
         let sequence = Self::find_sequence(input);
+        let guild_id = Self::find_guild_id(input);
 
         Some(Self {
             event_type,
             op,
             sequence,
+            guild_id,
         })
     }
 
@@ -57,10 +60,16 @@ impl<'a> GatewayEvent<'a> {
         self.op.0
     }
 
+    /// Return the guild_id if present in the payload.
+    #[allow(dead_code)]
+    pub const fn guild_id(&self) -> Option<u64> {
+        self.guild_id
+    }
+
     /// Consume the deserializer, returning its opcode and event type
     /// components.
-    pub const fn into_parts(self) -> (OpInfo, Option<SequenceInfo>, Option<EventTypeInfo<'a>>) {
-        (self.op, self.sequence, self.event_type)
+    pub const fn into_parts(self) -> (OpInfo, Option<SequenceInfo>, Option<EventTypeInfo<'a>>, Option<u64>) {
+        (self.op, self.sequence, self.event_type, self.guild_id)
     }
 
     fn find_event_type(input: &'a str) -> Option<EventTypeInfo<'a>> {
@@ -115,5 +124,39 @@ impl<'a> GatewayEvent<'a> {
         let clean = input.get(range.clone())?;
 
         T::from_str(clean).ok().map(|int| (int, range))
+    }
+
+    /// Find guild_id in the payload. Discord sends snowflakes as strings,
+    /// so we need to handle both `"guild_id":"123"` and `"guild_id":123`.
+    /// 
+    /// This searches for guild_id within the "d" (data) object of the payload.
+    /// Most guild events have guild_id at the top level of "d".
+    fn find_guild_id(input: &'a str) -> Option<u64> {
+        // Look for "guild_id" key
+        let key = r#""guild_id":"#;
+        let from = input.find(key)? + key.len();
+        
+        // Skip whitespace
+        let rest = input.get(from..)?;
+        let first_non_ws = rest.find(|c: char| !c.is_whitespace())?;
+        let start = from + first_non_ws;
+        
+        let first_char = input.as_bytes().get(start).copied()?;
+        
+        if first_char == b'"' {
+            // String value: "guild_id":"123456789"
+            let value_start = start + 1;
+            let value_end = input.get(value_start..)?.find('"')? + value_start;
+            let value = input.get(value_start..value_end)?;
+            u64::from_str(value).ok()
+        } else if first_char == b'n' {
+            // null value
+            None
+        } else {
+            // Numeric value: "guild_id":123456789
+            let to = input.get(start..)?.find(&[',', '}', ' ', '\n'] as &[_])?;
+            let value = input.get(start..start + to)?;
+            u64::from_str(value).ok()
+        }
     }
 }

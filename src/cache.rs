@@ -21,7 +21,7 @@ use twilight_model::{
     voice::VoiceState,
 };
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::model::JsonObject;
 
@@ -45,14 +45,19 @@ impl Guilds {
     }
 
     #[allow(clippy::missing_const_for_fn)]
-    pub fn stats(&self) -> InMemoryCacheStats {
+    pub fn stats(&self) -> InMemoryCacheStats<'_> {
         self.0.stats()
     }
 
+    /// Get a READY payload for the client.
+    /// 
+    /// If `authorized_guilds` is Some, only those guilds are included in the READY.
+    /// If `authorized_guilds` is None, all guilds are included (original behavior).
     pub fn get_ready_payload(
         &self,
         mut ready: JsonObject,
         sequence: &mut usize,
+        authorized_guilds: Option<&HashSet<u64>>,
     ) -> Payload<JsonObject> {
         *sequence += 1;
 
@@ -73,11 +78,22 @@ impl Guilds {
             }
         };
 
+        // Helper to check if guild is authorized
+        let is_authorized = |guild_id: Id<GuildMarker>| -> bool {
+            match authorized_guilds {
+                Some(guilds) => guilds.contains(&guild_id.get()),
+                None => true, // No filter, all guilds authorized
+            }
+        };
+
         let guilds: Vec<_> = self
             .0
             .iter()
             .guilds()
             .filter_map(|guild| {
+                if !is_authorized(guild.id()) {
+                    return None;
+                }
                 if guild.unavailable() == Some(true) {
                     // Will be part of unavailable_guilds iterator
                     None
@@ -85,7 +101,13 @@ impl Guilds {
                     Some(guild_id_to_json(guild.id()))
                 }
             })
-            .chain(self.0.iter().unavailable_guilds().map(guild_id_to_json))
+            .chain(
+                self.0
+                    .iter()
+                    .unavailable_guilds()
+                    .filter(|guild_id| is_authorized(*guild_id))
+                    .map(guild_id_to_json),
+            )
             .collect();
 
         ready.insert(String::from("guilds"), OwnedValue::Array(guilds.into()));
@@ -325,98 +347,112 @@ impl Guilds {
             .unwrap_or_default()
     }
 
+    /// Get GUILD_CREATE/GUILD_DELETE payloads for the client.
+    /// 
+    /// If `authorized_guilds` is Some, only those guilds are included.
+    /// If `authorized_guilds` is None, all guilds are included (original behavior).
     pub fn get_guild_payloads<'a>(
         &'a self,
         sequence: &'a mut usize,
+        authorized_guilds: Option<&'a HashSet<u64>>,
     ) -> impl Iterator<Item = String> + 'a {
-        self.0.iter().guilds().map(move |guild| {
-            *sequence += 1;
+        self.0
+            .iter()
+            .guilds()
+            .filter(move |guild| {
+                match authorized_guilds {
+                    Some(guilds) => guilds.contains(&guild.id().get()),
+                    None => true, // No filter, all guilds authorized
+                }
+            })
+            .map(move |guild| {
+                *sequence += 1;
 
-            if guild.unavailable() == Some(true) {
-                to_string(&Payload {
-                    d: GuildDelete {
+                if guild.unavailable() == Some(true) {
+                    to_string(&Payload {
+                        d: GuildDelete {
+                            id: guild.id(),
+                            unavailable: Some(true),
+                        },
+                        op: OpCode::Dispatch,
+                        t: "GUILD_DELETE",
+                        s: *sequence,
+                    })
+                    .unwrap()
+                } else {
+                    let guild_channels = self.channels_in_guild(guild.id());
+                    let presences = self.presences_in_guild(guild.id());
+                    let emojis = self.emojis_in_guild(guild.id());
+                    let members = self.members_in_guild(guild.id());
+                    let roles = self.roles_in_guild(guild.id());
+                    let scheduled_events = self.scheduled_events_in_guild(guild.id());
+                    let stage_instances = self.stage_instances_in_guild(guild.id());
+                    let stickers = self.stickers_in_guild(guild.id());
+                    let voice_states = self.voice_states_in_guild(guild.id());
+                    let threads = self.threads_in_guild(guild.id());
+
+                    let new_guild = Guild {
+                        afk_channel_id: guild.afk_channel_id(),
+                        afk_timeout: guild.afk_timeout(),
+                        application_id: guild.application_id(),
+                        approximate_member_count: None, // Only present in with_counts HTTP endpoint
+                        banner: guild.banner().map(ToOwned::to_owned),
+                        approximate_presence_count: None, // Only present in with_counts HTTP endpoint
+                        channels: guild_channels,
+                        default_message_notifications: guild.default_message_notifications(),
+                        description: guild.description().map(ToString::to_string),
+                        discovery_splash: guild.discovery_splash().map(ToOwned::to_owned),
+                        emojis,
+                        explicit_content_filter: guild.explicit_content_filter(),
+                        features: guild.features().cloned().collect(),
+                        guild_scheduled_events: scheduled_events,
+                        icon: guild.icon().map(ToOwned::to_owned),
                         id: guild.id(),
-                        unavailable: Some(true),
-                    },
-                    op: OpCode::Dispatch,
-                    t: "GUILD_DELETE",
-                    s: *sequence,
-                })
-                .unwrap()
-            } else {
-                let guild_channels = self.channels_in_guild(guild.id());
-                let presences = self.presences_in_guild(guild.id());
-                let emojis = self.emojis_in_guild(guild.id());
-                let members = self.members_in_guild(guild.id());
-                let roles = self.roles_in_guild(guild.id());
-                let scheduled_events = self.scheduled_events_in_guild(guild.id());
-                let stage_instances = self.stage_instances_in_guild(guild.id());
-                let stickers = self.stickers_in_guild(guild.id());
-                let voice_states = self.voice_states_in_guild(guild.id());
-                let threads = self.threads_in_guild(guild.id());
+                        joined_at: guild.joined_at(),
+                        large: guild.large(),
+                        max_members: guild.max_members(),
+                        max_presences: guild.max_presences(),
+                        max_stage_video_channel_users: guild.max_stage_video_channel_users(),
+                        max_video_channel_users: guild.max_video_channel_users(),
+                        member_count: guild.member_count(),
+                        members,
+                        mfa_level: guild.mfa_level(),
+                        name: guild.name().to_string(),
+                        nsfw_level: guild.nsfw_level(),
+                        owner_id: guild.owner_id(),
+                        owner: guild.owner(),
+                        permissions: guild.permissions(),
+                        public_updates_channel_id: guild.public_updates_channel_id(),
+                        preferred_locale: guild.preferred_locale().to_string(),
+                        premium_progress_bar_enabled: guild.premium_progress_bar_enabled(),
+                        premium_subscription_count: guild.premium_subscription_count(),
+                        premium_tier: guild.premium_tier(),
+                        presences,
+                        roles,
+                        rules_channel_id: guild.rules_channel_id(),
+                        safety_alerts_channel_id: guild.safety_alerts_channel_id(),
+                        splash: guild.splash().map(ToOwned::to_owned),
+                        stage_instances,
+                        stickers,
+                        system_channel_flags: guild.system_channel_flags(),
+                        system_channel_id: guild.system_channel_id(),
+                        threads,
+                        unavailable: Some(false),
+                        vanity_url_code: guild.vanity_url_code().map(ToString::to_string),
+                        verification_level: guild.verification_level(),
+                        voice_states,
+                        widget_channel_id: guild.widget_channel_id(),
+                        widget_enabled: guild.widget_enabled(),
+                    };
 
-                let new_guild = Guild {
-                    afk_channel_id: guild.afk_channel_id(),
-                    afk_timeout: guild.afk_timeout(),
-                    application_id: guild.application_id(),
-                    approximate_member_count: None, // Only present in with_counts HTTP endpoint
-                    banner: guild.banner().map(ToOwned::to_owned),
-                    approximate_presence_count: None, // Only present in with_counts HTTP endpoint
-                    channels: guild_channels,
-                    default_message_notifications: guild.default_message_notifications(),
-                    description: guild.description().map(ToString::to_string),
-                    discovery_splash: guild.discovery_splash().map(ToOwned::to_owned),
-                    emojis,
-                    explicit_content_filter: guild.explicit_content_filter(),
-                    features: guild.features().cloned().collect(),
-                    guild_scheduled_events: scheduled_events,
-                    icon: guild.icon().map(ToOwned::to_owned),
-                    id: guild.id(),
-                    joined_at: guild.joined_at(),
-                    large: guild.large(),
-                    max_members: guild.max_members(),
-                    max_presences: guild.max_presences(),
-                    max_stage_video_channel_users: guild.max_stage_video_channel_users(),
-                    max_video_channel_users: guild.max_video_channel_users(),
-                    member_count: guild.member_count(),
-                    members,
-                    mfa_level: guild.mfa_level(),
-                    name: guild.name().to_string(),
-                    nsfw_level: guild.nsfw_level(),
-                    owner_id: guild.owner_id(),
-                    owner: guild.owner(),
-                    permissions: guild.permissions(),
-                    public_updates_channel_id: guild.public_updates_channel_id(),
-                    preferred_locale: guild.preferred_locale().to_string(),
-                    premium_progress_bar_enabled: guild.premium_progress_bar_enabled(),
-                    premium_subscription_count: guild.premium_subscription_count(),
-                    premium_tier: guild.premium_tier(),
-                    presences,
-                    roles,
-                    rules_channel_id: guild.rules_channel_id(),
-                    safety_alerts_channel_id: guild.safety_alerts_channel_id(),
-                    splash: guild.splash().map(ToOwned::to_owned),
-                    stage_instances,
-                    stickers,
-                    system_channel_flags: guild.system_channel_flags(),
-                    system_channel_id: guild.system_channel_id(),
-                    threads,
-                    unavailable: Some(false),
-                    vanity_url_code: guild.vanity_url_code().map(ToString::to_string),
-                    verification_level: guild.verification_level(),
-                    voice_states,
-                    widget_channel_id: guild.widget_channel_id(),
-                    widget_enabled: guild.widget_enabled(),
-                };
-
-                to_string(&Payload {
-                    d: new_guild,
-                    op: OpCode::Dispatch,
-                    t: "GUILD_CREATE",
-                    s: *sequence,
-                })
-                .unwrap()
-            }
-        })
+                    to_string(&Payload {
+                        d: new_guild,
+                        op: OpCode::Dispatch,
+                        t: "GUILD_CREATE",
+                        s: *sequence,
+                    })
+                    .unwrap()
+                }
+            })
     }
 }
