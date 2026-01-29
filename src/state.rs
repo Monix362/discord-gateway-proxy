@@ -3,7 +3,7 @@ use tokio::sync::{broadcast, Notify};
 use twilight_gateway::MessageSender;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
@@ -71,6 +71,10 @@ pub struct Session {
     pub shard_id: u32,
     /// Compression as requested in IDENTIFY.
     pub compress: Option<bool>,
+    /// Guild IDs this client is authorized to receive events for.
+    /// None means all events are forwarded (legacy behavior).
+    /// Some(set) means only events for guilds in the set are forwarded.
+    pub authorized_guilds: Option<Arc<HashSet<u64>>>,
 }
 
 /// Global state for all shards managed by the proxy.

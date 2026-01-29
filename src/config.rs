@@ -11,6 +11,7 @@ use twilight_gateway::{EventTypeFlags, Intents};
 use twilight_model::gateway::presence::{Activity, Status};
 
 use std::{
+    collections::{HashMap, HashSet},
     env::var,
     fmt::{Display, Formatter, Result as FmtResult},
     fs::read_to_string,
@@ -18,6 +19,62 @@ use std::{
     str::FromStr,
     sync::LazyLock,
 };
+
+/// Configuration for a client that can connect to the proxy.
+/// Each client has a secret token and a list of guild IDs they're authorized to receive events for.
+#[derive(Deserialize, Clone)]
+pub struct ClientConfig {
+    /// Secret token the client uses to authenticate (sent in IDENTIFY payload)
+    pub secret: String,
+    /// List of guild IDs this client is authorized to receive events for.
+    /// Guild IDs can be strings or numbers in the JSON config.
+    #[serde(default, deserialize_with = "deserialize_guild_ids")]
+    pub guilds: HashSet<u64>,
+}
+
+/// Custom deserializer to handle guild IDs as either strings or numbers
+fn deserialize_guild_ids<'de, D>(deserializer: D) -> Result<HashSet<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+
+    struct GuildIdsVisitor;
+
+    impl<'de> Visitor<'de> for GuildIdsVisitor {
+        type Value = HashSet<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of guild IDs (as strings or numbers)")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut set = HashSet::new();
+
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum GuildId {
+                String(String),
+                Number(u64),
+            }
+
+            while let Some(id) = seq.next_element::<GuildId>()? {
+                let parsed = match id {
+                    GuildId::String(s) => s.parse::<u64>().map_err(serde::de::Error::custom)?,
+                    GuildId::Number(n) => n,
+                };
+                set.insert(parsed);
+            }
+
+            Ok(set)
+        }
+    }
+
+    deserializer.deserialize_seq(GuildIdsVisitor)
+}
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -47,6 +104,11 @@ pub struct Config {
     pub externally_accessible_url: String,
     #[serde(default)]
     pub cache: Cache,
+    /// Map of client ID to client configuration.
+    /// Clients authenticate using their ID and secret in the IDENTIFY token field.
+    /// Format: "client_id:client_secret" or just use the bot token for legacy behavior.
+    #[serde(default)]
+    pub clients: HashMap<String, ClientConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -217,6 +279,30 @@ const fn default_backpressure() -> usize {
 
 const fn default_validate_token() -> bool {
     true
+}
+
+impl Config {
+    /// Look up a client by their authentication token.
+    /// 
+    /// Token format: "client_id:client_secret"
+    /// 
+    /// Returns Some(guilds) if the client is found and authenticated.
+    /// Returns None if:
+    /// - Token doesn't match the expected format
+    /// - Client ID not found in config
+    /// - Client secret doesn't match
+    pub fn authenticate_client(&self, token: &str) -> Option<HashSet<u64>> {
+        // Check if token contains client auth format "client_id:secret"
+        let (client_id, secret) = token.split_once(':')?;
+        
+        let client = self.clients.get(client_id)?;
+        
+        if client.secret == secret {
+            Some(client.guilds.clone())
+        } else {
+            None
+        }
+    }
 }
 
 pub enum Error {

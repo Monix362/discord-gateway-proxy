@@ -279,12 +279,23 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     break;
                 }
 
-                // Discord tokens may be prefixed by 'Bot ' in IDENTIFY
-                if CONFIG.validate_token
-                    && identify.d.token.split_whitespace().last() != Some(&CONFIG.token)
-                {
-                    warn!("[{addr}] Token from client mismatched, disconnecting");
-                    break;
+                // Try to authenticate as a multi-tenant client first.
+                // Token format for multi-tenant: "client_id:client_secret"
+                // If that fails, fall back to validating against the bot token.
+                let client_token = identify.d.token.split_whitespace().last().unwrap_or("");
+                let authorized_guilds: Option<Arc<HashSet<u64>>> = 
+                    CONFIG.authenticate_client(client_token).map(Arc::new);
+
+                // If not a valid multi-tenant client, validate against bot token
+                if authorized_guilds.is_none() && CONFIG.validate_token {
+                    if client_token != CONFIG.token {
+                        warn!("[{addr}] Token from client mismatched and not a valid client, disconnecting");
+                        break;
+                    }
+                }
+
+                if authorized_guilds.is_some() {
+                    debug!("[{addr}] Client authenticated as multi-tenant client");
                 }
 
                 trace!("[{addr}] Shard ID is {shard_id}");
@@ -293,6 +304,7 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                 let session = Session {
                     shard_id,
                     compress: identify.d.compress,
+                    authorized_guilds: authorized_guilds.clone(),
                 };
                 let session_id = state.create_session(session);
 
@@ -301,9 +313,6 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                 shard_sender = Some(shard.sender.clone());
 
                 if let Some(sender) = compress_tx.take() {
-                    // TODO: Get authorized_guilds from client authentication
-                    let authorized_guilds: Option<Arc<HashSet<u64>>> = None;
-                    
                     shard_forward_task = Some(tokio::spawn(forward_shard(
                         session_id,
                         shard,
@@ -346,11 +355,9 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     debug!("[{addr}] Successfully resuming session {session_id}",);
 
                     let shard = state.shards[session.shard_id as usize].clone();
+                    let authorized_guilds = session.authorized_guilds.clone();
 
                     if let Some(sender) = compress_tx.take() {
-                        // TODO: Get authorized_guilds from session
-                        let authorized_guilds: Option<Arc<HashSet<u64>>> = None;
-                        
                         shard_forward_task = Some(tokio::spawn(forward_shard(
                             session_id,
                             shard.clone(),
