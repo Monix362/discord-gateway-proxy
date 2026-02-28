@@ -68,6 +68,29 @@ fn compress_full(compressor: &mut Compress, output: &mut Vec<u8>, input: &[u8]) 
     }
 }
 
+/// Lazily initialized zlib compression state.
+/// Avoids allocating ~200KB of zlib internal state + 32KB buffer per connection
+/// when compression is not used (the common case for non-internet clients).
+struct ZlibState {
+    compress: Compress,
+    buffer: Vec<u8>,
+}
+
+impl ZlibState {
+    fn new() -> Self {
+        Self {
+            compress: Compress::new(Compression::fast(), true),
+            buffer: Vec::with_capacity(32 * 1024),
+        }
+    }
+
+    fn compress_and_send(&mut self, input: &[u8]) -> Bytes {
+        self.buffer.clear();
+        compress_full(&mut self.compress, &mut self.buffer, input);
+        Bytes::from(self.buffer.clone())
+    }
+}
+
 async fn sink_from_queue<S>(
     addr: SocketAddr,
     mut use_zlib: bool,
@@ -78,16 +101,17 @@ async fn sink_from_queue<S>(
 where
     S: Sink<Message, Error = Error> + Unpin + Send,
 {
-    // Initialize a zlib encoder with similar settings to Discord's
-    let mut compress = Compress::new(Compression::fast(), true);
-    let mut compression_buffer = Vec::with_capacity(32 * 1024);
+    // Zlib state is lazily initialized only when compression is actually needed.
+    // This saves ~230KB per connection (flate2 Compress internal state + 32KB buffer)
+    // for clients that don't request zlib-stream transport encoding.
+    let mut zlib: Option<ZlibState> = None;
 
     // At first, we will have to send a HELLO
     if use_zlib {
-        compress_full(&mut compress, &mut compression_buffer, HELLO.as_bytes());
+        let state = zlib.get_or_insert_with(ZlibState::new);
+        let compressed = state.compress_and_send(HELLO.as_bytes());
 
-        sink.send(Message::binary(Bytes::from(compression_buffer.clone())))
-            .await?;
+        sink.send(Message::binary(compressed)).await?;
     } else {
         sink.send(Message::text(HELLO.to_string())).await?;
     }
@@ -100,11 +124,10 @@ where
         trace!("[{addr}] Sending {msg:?}");
 
         if use_zlib {
-            compression_buffer.clear();
-            compress_full(&mut compress, &mut compression_buffer, &msg.into_payload());
+            let state = zlib.get_or_insert_with(ZlibState::new);
+            let compressed = state.compress_and_send(&msg.into_payload());
 
-            sink.send(Message::binary(Bytes::from(compression_buffer.clone())))
-                .await?;
+            sink.send(Message::binary(compressed)).await?;
         } else {
             sink.send(msg).await?;
         }
