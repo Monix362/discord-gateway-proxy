@@ -307,7 +307,7 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                 // If that fails, fall back to validating against the bot token.
                 let client_token = identify.d.token.split_whitespace().last().unwrap_or("");
                 let authorized_guilds: Option<Arc<HashSet<u64>>> = 
-                    CONFIG.authenticate_client(client_token).map(Arc::new);
+                    crate::db_config::authenticate_client(client_token).map(Arc::new);
 
                 // If not a valid multi-tenant client, validate against bot token
                 if authorized_guilds.is_none() && CONFIG.validate_token {

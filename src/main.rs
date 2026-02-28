@@ -40,6 +40,7 @@ use crate::config::CONFIG;
 
 mod cache;
 mod config;
+mod db_config;
 mod deserializer;
 mod dispatch;
 mod model;
@@ -177,6 +178,13 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             error!("{}", e);
         }
     });
+
+    // If DATABASE_URL is set, poll the database for dynamic client config.
+    // This replaces config.json clients with database-managed clients,
+    // allowing new guilds to be added at runtime without restarting.
+    if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        tokio::spawn(db_config::start_polling(database_url));
+    }
 
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();

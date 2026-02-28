@@ -289,30 +289,6 @@ const fn default_validate_token() -> bool {
     true
 }
 
-impl Config {
-    /// Look up a client by their authentication token.
-    /// 
-    /// Token format: "client_id:client_secret"
-    /// 
-    /// Returns Some(guilds) if the client is found and authenticated.
-    /// Returns None if:
-    /// - Token doesn't match the expected format
-    /// - Client ID not found in config
-    /// - Client secret doesn't match
-    pub fn authenticate_client(&self, token: &str) -> Option<HashSet<u64>> {
-        // Check if token contains client auth format "client_id:secret"
-        let (client_id, secret) = token.split_once(':')?;
-        
-        let client = self.clients.get(client_id)?;
-        
-        if client.secret == secret {
-            Some(client.guilds.clone())
-        } else {
-            None
-        }
-    }
-}
-
 pub enum Error {
     InvalidConfig(JsonError),
     NotFound(String),
