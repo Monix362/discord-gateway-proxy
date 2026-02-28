@@ -32,6 +32,7 @@ mimalloc = { version = "0.1", default-features = false, features = [
 ] }
 rand = "0.8"
 ring = { version = "0.17", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", default-features = false, features = [
     "std",
@@ -43,9 +44,8 @@ tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "signal",
 ] }
-tokio-websockets = { version = "0.11", default-features = false, features = [
-    "nightly",
-    "simd",
+tokio-websockets = { version = "0.13", default-features = false, features = [
+    "ring",
     "server",
 ] }
 tracing = { version = "0.1", default-features = false, features = ["log"] }
@@ -53,18 +53,16 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "std",
 ] }
-twilight-cache-inmemory = { git = "https://github.com/Gelbpunkt/twilight.git", branch = "0.16", default-features = false }
-twilight-gateway = { git = "https://github.com/Gelbpunkt/twilight.git", branch = "0.16", default-features = false, features = [
+twilight-cache-inmemory = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false }
+twilight-gateway = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
     "rustls-webpki-roots",
-    "rustls-aws_lc_rs",
 ] }
-twilight-gateway-queue = { git = "https://github.com/Gelbpunkt/twilight.git", branch = "0.16", default-features = false, features = [
+twilight-gateway-queue = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
 ] }
-twilight-http = { git = "https://github.com/Gelbpunkt/twilight.git", branch = "0.16", default-features = false, features = [
+twilight-http = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
     "rustls-webpki-roots",
-    "rustls-aws_lc_rs",
 ] }
-twilight-model = { git = "https://github.com/Gelbpunkt/twilight.git", branch = "0.16" }
+twilight-model = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = { version = "0.11", default-features = false, features = ["stream"] }
@@ -74,11 +72,9 @@ default = ["simd"]
 simd = [
     "flate2/zlib-ng",
     "simd-json",
-    "twilight-gateway/zlib-simd",
-    "twilight-gateway/simd-json",
-    "twilight-http/simd-json",
+    "twilight-gateway/zlib",
 ]
-no-simd = ["flate2/zlib", "serde_json", "twilight-gateway/zlib-stock"]
+no-simd = ["flate2/zlib", "serde_json", "twilight-gateway/zlib"]
 
 [profile.release]
 codegen-units = 1

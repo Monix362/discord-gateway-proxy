@@ -196,6 +196,8 @@ impl Guilds {
 
         Some(Member {
             avatar: member.avatar(),
+            avatar_decoration_data: None,
+            banner: None,
             communication_disabled_until: member.communication_disabled_until(),
             deaf: member.deaf().unwrap_or_default(),
             flags: member.flags(),

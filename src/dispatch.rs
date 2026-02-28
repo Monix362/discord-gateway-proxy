@@ -125,22 +125,27 @@ pub async fn events(
             }
         }
 
-        if let Ok(Some(event)) = parse(payload, event_type_flags) {
-            match event {
-                TwilightGatewayEvent::Dispatch(_, event) => {
-                    shard_state.guilds.update(Event::from(event));
-                }
-                TwilightGatewayEvent::InvalidateSession(can_resume) => {
-                    debug!("[Shard {shard_id}] Session invalidated, resumable: {can_resume}");
-                    if !can_resume {
-                        // We can only reset the READY state if we know that we will get a new READY,
-                        // which is the case if we can not resume.
-                        shard_state.ready.set_not_ready();
+        match parse(payload, event_type_flags) {
+            Ok(Some(event)) => {
+                match event {
+                    TwilightGatewayEvent::Dispatch(_, event) => {
+                        shard_state.guilds.update(Event::from(event));
                     }
-                    // Suspend sending events to clients until READY or RESUMED are received.
-                    is_ready = false;
+                    TwilightGatewayEvent::InvalidateSession(can_resume) => {
+                        debug!("[Shard {shard_id}] Session invalidated, resumable: {can_resume}");
+                        if !can_resume {
+                            shard_state.ready.set_not_ready();
+                        }
+                        is_ready = false;
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            Ok(None) => {
+                // Event type not in event_type_flags, skipped
+            }
+            Err(e) => {
+                tracing::warn!("[Shard {shard_id}] Failed to parse gateway event: {e:?}");
             }
         }
     }
