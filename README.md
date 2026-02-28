@@ -126,6 +126,52 @@ Events without a `guild_id` (DMs, USER_UPDATE, etc.) are **not forwarded** to mu
 
 **Backward compatibility:** Clients connecting with the real bot token (or `Bot YOUR_TOKEN`) get all events for all guilds, same as before. The `clients` config is optional -- omitting it preserves the original single-client behavior.
 
+## Dynamic client config (database)
+
+For deployments where clients/guilds change at runtime (e.g. when users install the bot in new servers), set the `DATABASE_URL` environment variable to a Postgres connection string. The proxy will poll the database every second and update the client map without restarting.
+
+```bash
+DATABASE_URL=postgres://user:pass@host/db ./gateway-proxy
+```
+
+The table is created automatically on first connection. One row per client+guild pair:
+
+**SQL schema:**
+
+```sql
+CREATE TABLE IF NOT EXISTS gateway_clients (
+    client_id  TEXT NOT NULL,
+    secret     TEXT NOT NULL,
+    guild_id   TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (client_id, guild_id)
+);
+```
+
+**Prisma schema:**
+
+```prisma
+model GatewayClient {
+  clientId  String   @map("client_id")
+  secret    String
+  guildId   String   @map("guild_id")
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@id([clientId, guildId])
+  @@map("gateway_clients")
+}
+```
+
+**Example rows:**
+
+| client_id | secret | guild_id |
+|-----------|--------|----------|
+| us-east | random-secret-us-east | 1111111111111111 |
+| us-east | random-secret-us-east | 2222222222222222 |
+| eu-west | random-secret-eu-west | 3333333333333333 |
+
+When `DATABASE_URL` is set, the database becomes the sole source of truth for clients after the first poll. Config.json `clients` are used as the initial seed until then. If `DATABASE_URL` is not set, config.json clients are used as before.
+
 ## Running
 
 Compiling this from source isn't the most fun, you'll need a nightly Rust compiler with the rust-src component installed. Then run `cargo build --release --target=MY_RUSTC_TARGET`, where `MY_RUSTC_TARGET` is probably `x86_64-unknown-linux-gnu`.
