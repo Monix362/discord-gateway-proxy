@@ -1,4 +1,6 @@
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
+#[cfg(target_os = "linux")]
 use inotify::{Inotify, WatchMask};
 use serde::Deserialize;
 #[cfg(not(feature = "simd-json"))]
@@ -16,9 +18,10 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult},
     fs::read_to_string,
     process::exit,
-    str::FromStr,
     sync::LazyLock,
 };
+#[cfg(target_os = "linux")]
+use std::str::FromStr;
 
 /// Configuration for a client that can connect to the proxy.
 /// Each client has a secret token and a list of guild IDs they're authorized to receive events for.
@@ -346,6 +349,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     }
 });
 
+#[cfg(target_os = "linux")]
 pub async fn watch_config_changes<S>(reload_handle: reload::Handle<LevelFilter, S>) {
     let Ok(inotify) = Inotify::init() else {
         tracing::error!("Failed to initialize inotify, log-levels cannot be reloaded on the fly");
@@ -378,4 +382,9 @@ pub async fn watch_config_changes<S>(reload_handle: reload::Handle<LevelFilter, 
             tracing::error!("Config was modified, but failed to reload");
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn watch_config_changes<S>(_reload_handle: reload::Handle<LevelFilter, S>) {
+    tracing::warn!("Config hot-reload is only supported on Linux (requires inotify)");
 }
