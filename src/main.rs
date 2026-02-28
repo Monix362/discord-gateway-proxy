@@ -103,9 +103,14 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     info!("Creating shards {shard_start} to {shard_end_inclusive} of {shard_count} total",);
 
-    let config = ConfigBuilder::new(CONFIG.token.clone(), CONFIG.intents)
-        .queue(queue)
-        .build();
+    let mut config_builder = ConfigBuilder::new(CONFIG.token.clone(), CONFIG.intents)
+        .queue(queue);
+
+    if let Some(ref gateway_url) = CONFIG.gateway_url {
+        config_builder = config_builder.proxy_url(gateway_url.clone());
+    }
+
+    let config = config_builder.build();
 
     let mut dispatch_tasks = JoinSet::new();
 

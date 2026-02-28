@@ -56,9 +56,75 @@ You can omit the `token` key entirely and set the `TOKEN` environment variable w
 
 By default, the total shard count will be calculated using the `/api/gateway/bot` endpoint. If you want to change this, set `shards` to the amount of shards. It will also launch all shards by default, you can customize this to launch only a range of shards using `shard_start` and `shard_end` (start inclusive, end exclusive).
 
-If you're using twilight's HTTP-proxy, set `twilight_http_proxy` to the `ip:port` of the HTTP proxy.
+If you're using twilight's HTTP-proxy, set `twilight_http_proxy` to the `ip:port` of the HTTP proxy. This redirects all Discord REST API calls (like `/api/gateway/bot`) through that host.
+
+To override the gateway WebSocket URL that shards connect to, set `gateway_url`. This is separate from the HTTP proxy -- it controls where the actual WebSocket connections go. Useful for testing with a local fake Discord server:
+
+```json
+{
+  "gateway_url": "ws://127.0.0.1:54321/gateway",
+  "twilight_http_proxy": "127.0.0.1:54321"
+}
+```
+
+If `gateway_url` is not set, shards connect to `wss://gateway.discord.gg` (the default).
 
 Take special care when setting cache flags, only enable what you actually need. The proxy will tend to send more than Discord would, so double check what your bot depends on.
+
+## Multi-tenant mode
+
+The proxy supports routing events to multiple independent clients, each receiving only events for their authorized guilds. This enables horizontal scaling where bot instances on different machines each handle a subset of guilds while sharing a single gateway connection.
+
+```
+                         Discord Gateway API
+                               |
+                      [gateway-proxy :7878]
+                       single bot token
+                       all shards, all guilds
+                      /         |         \
+               machine-1    machine-2    machine-3
+               "us:secret1"  "eu:secret2" bot_token
+               guilds:       guilds:      all guilds
+               [111, 222]    [333, 444]   (legacy)
+```
+
+Add a `clients` map to `config.json`. Each key is a client ID and the value contains a secret and a list of guild IDs that client is authorized to receive events for:
+
+```json
+{
+  "token": "YOUR_BOT_TOKEN",
+  "intents": 32511,
+  "port": 7878,
+  "externally_accessible_url": "ws://proxy.internal:7878",
+  "cache": {
+    "channels": true,
+    "roles": true,
+    "members": true
+  },
+  "clients": {
+    "us-east": {
+      "secret": "random-secret-us-east",
+      "guilds": ["1111111111111111", "2222222222222222"]
+    },
+    "eu-west": {
+      "secret": "random-secret-eu-west",
+      "guilds": ["3333333333333333", "4444444444444444"]
+    }
+  }
+}
+```
+
+Guild IDs can be strings or numbers in the config.
+
+**Connecting as a multi-tenant client:** Instead of the bot token, send `client_id:client_secret` as the token in your IDENTIFY payload. For example, `us-east:random-secret-us-east`. The proxy authenticates the client and only forwards:
+
+- READY payloads containing only the client's authorized guilds
+- GUILD_CREATE/GUILD_DELETE events for authorized guilds only
+- Dispatch events that have a `guild_id` matching the authorized set
+
+Events without a `guild_id` (DMs, USER_UPDATE, etc.) are **not forwarded** to multi-tenant clients since they can't be attributed to a specific guild.
+
+**Backward compatibility:** Clients connecting with the real bot token (or `Bot YOUR_TOKEN`) get all events for all guilds, same as before. The `clients` config is optional -- omitting it preserves the original single-client behavior.
 
 ## Running
 

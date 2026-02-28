@@ -104,6 +104,11 @@ pub struct Config {
     pub validate_token: bool,
     #[serde(default)]
     pub twilight_http_proxy: Option<String>,
+    /// Override the Discord gateway WebSocket URL that shards connect to.
+    /// Useful for testing with a local fake Discord server.
+    /// If not set, shards connect to wss://gateway.discord.gg (default).
+    #[serde(default)]
+    pub gateway_url: Option<String>,
     pub externally_accessible_url: String,
     #[serde(default)]
     pub cache: Cache,
