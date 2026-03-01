@@ -25,13 +25,16 @@ use tokio::{
 use tokio_websockets::{Error, Limits, Message, ServerBuilder};
 use tracing::{debug, error, info, trace, warn};
 
-use std::{collections::HashSet, convert::Infallible, future::ready, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashSet, convert::Infallible, future::ready, net::SocketAddr, sync::Arc,
+    time::Instant,
+};
 
 use crate::{
     config::CONFIG,
     deserializer::{GatewayEvent, SequenceInfo},
     model::{Identify, Resume},
-    state::{Session, Shard, State},
+    state::{Session, SessionPrincipal, Shard, State},
     upgrade,
 };
 
@@ -41,6 +44,40 @@ const INVALID_SESSION: &str = r#"{"t":null,"s":null,"op":9,"d":false}"#;
 const RESUMED: &str = r#"{"t":"RESUMED","s":null,"op":0,"d":{}}"#;
 
 const TRAILER: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
+
+struct AuthContext {
+    principal: SessionPrincipal,
+    authorized_guilds: Option<Arc<HashSet<u64>>>,
+}
+
+fn normalize_gateway_token(token: &str) -> &str {
+    token.split_whitespace().last().unwrap_or("")
+}
+
+fn authenticate_gateway_token(token: &str) -> Option<AuthContext> {
+    if let Some((client_id, guilds)) = crate::db_config::authenticate_client_with_id(token) {
+        return Some(AuthContext {
+            principal: SessionPrincipal::Client(client_id),
+            authorized_guilds: Some(Arc::new(guilds)),
+        });
+    }
+
+    if token == CONFIG.token {
+        return Some(AuthContext {
+            principal: SessionPrincipal::BotToken,
+            authorized_guilds: None,
+        });
+    }
+
+    if CONFIG.validate_token {
+        return None;
+    }
+
+    Some(AuthContext {
+        principal: SessionPrincipal::Unvalidated(token.to_string()),
+        authorized_guilds: None,
+    })
+}
 
 fn compress_full(compressor: &mut Compress, output: &mut Vec<u8>, input: &[u8]) {
     let before_in = compressor.total_in() as usize;
@@ -137,7 +174,7 @@ where
 }
 
 /// Forward events from a shard to a connected client.
-/// 
+///
 /// If `authorized_guilds` is Some, only events for those guilds are forwarded.
 /// If `authorized_guilds` is None, all events are forwarded (original behavior).
 async fn forward_shard(
@@ -157,9 +194,11 @@ async fn forward_shard(
 
     if send_guilds {
         // Get a fake ready payload to send to the client
-        let mut ready_payload = shard_status
-            .guilds
-            .get_ready_payload(ready_payload, &mut seq, authorized_guilds.as_deref());
+        let mut ready_payload = shard_status.guilds.get_ready_payload(
+            ready_payload,
+            &mut seq,
+            authorized_guilds.as_deref(),
+        );
 
         // Overwrite the session ID in the READY
         ready_payload
@@ -173,7 +212,10 @@ async fn forward_shard(
 
         // Send GUILD_CREATE/GUILD_DELETEs based on guild availability
         // Filter to only authorized guilds if specified
-        for payload in shard_status.guilds.get_guild_payloads(&mut seq, authorized_guilds.as_deref()) {
+        for payload in shard_status
+            .guilds
+            .get_guild_payloads(&mut seq, authorized_guilds.as_deref())
+        {
             trace!("[Shard {shard_id}] Sending newly created GUILD_CREATE/GUILD_DELETE payload");
             let _res = stream_writer.send(Message::text(payload));
         }
@@ -302,22 +344,13 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     break;
                 }
 
-                // Try to authenticate as a multi-tenant client first.
-                // Token format for multi-tenant: "client_id:client_secret"
-                // If that fails, fall back to validating against the bot token.
-                let client_token = identify.d.token.split_whitespace().last().unwrap_or("");
-                let authorized_guilds: Option<Arc<HashSet<u64>>> = 
-                    crate::db_config::authenticate_client(client_token).map(Arc::new);
+                let client_token = normalize_gateway_token(&identify.d.token);
+                let Some(auth) = authenticate_gateway_token(client_token) else {
+                    warn!("[{addr}] Token from client mismatched and not a valid client, disconnecting");
+                    break;
+                };
 
-                // If not a valid multi-tenant client, validate against bot token
-                if authorized_guilds.is_none() && CONFIG.validate_token {
-                    if client_token != CONFIG.token {
-                        warn!("[{addr}] Token from client mismatched and not a valid client, disconnecting");
-                        break;
-                    }
-                }
-
-                if authorized_guilds.is_some() {
+                if matches!(auth.principal, SessionPrincipal::Client(_)) {
                     debug!("[{addr}] Client authenticated as multi-tenant client");
                 }
 
@@ -327,7 +360,9 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                 let session = Session {
                     shard_id,
                     compress: identify.d.compress,
-                    authorized_guilds: authorized_guilds.clone(),
+                    principal: auth.principal,
+                    authorized_guilds: auth.authorized_guilds.clone(),
+                    last_accessed: Instant::now(),
                 };
                 let session_id = state.create_session(session);
 
@@ -342,7 +377,7 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                         stream_writer.clone(),
                         true,
                         0,
-                        authorized_guilds,
+                        auth.authorized_guilds,
                     )));
 
                     let _res = sender.send(identify.d.compress);
@@ -364,21 +399,33 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     }
                 };
 
-                // Discord tokens may be prefixed by 'Bot ' in RESUME
-                if CONFIG.validate_token
-                    && resume.d.token.split_whitespace().last() != Some(&CONFIG.token)
-                {
+                let client_token = normalize_gateway_token(&resume.d.token);
+                let Some(resume_auth) = authenticate_gateway_token(client_token) else {
                     warn!("[{addr}] Token from client mismatched, disconnecting");
                     break;
-                }
+                };
 
                 // Find the shard that has the matching session ID
                 if let Some(session) = state.get_session(&resume.d.session_id) {
+                    if session.principal != resume_auth.principal {
+                        warn!(
+                            "[{addr}] RESUME principal mismatch for session {}, rejecting",
+                            resume.d.session_id
+                        );
+                        let _res = stream_writer.send(Message::text(INVALID_SESSION.to_string()));
+                        continue;
+                    }
+
                     let session_id = resume.d.session_id;
                     debug!("[{addr}] Successfully resuming session {session_id}",);
 
                     let shard = state.shards[session.shard_id as usize].clone();
-                    let authorized_guilds = session.authorized_guilds.clone();
+                    let authorized_guilds =
+                        if matches!(session.principal, SessionPrincipal::Client(_)) {
+                            resume_auth.authorized_guilds
+                        } else {
+                            session.authorized_guilds.clone()
+                        };
 
                     if let Some(sender) = compress_tx.take() {
                         shard_forward_task = Some(tokio::spawn(forward_shard(

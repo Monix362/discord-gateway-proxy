@@ -45,7 +45,7 @@ impl<'a> GatewayEvent<'a> {
         let op = Self::find_opcode(input)?;
         let event_type = Self::find_event_type(input);
         let sequence = Self::find_sequence(input);
-        let guild_id = Self::find_guild_id(input);
+        let guild_id = Self::find_guild_id(input, event_type.as_ref());
 
         Some(Self {
             event_type,
@@ -68,7 +68,14 @@ impl<'a> GatewayEvent<'a> {
 
     /// Consume the deserializer, returning its opcode and event type
     /// components.
-    pub const fn into_parts(self) -> (OpInfo, Option<SequenceInfo>, Option<EventTypeInfo<'a>>, Option<u64>) {
+    pub const fn into_parts(
+        self,
+    ) -> (
+        OpInfo,
+        Option<SequenceInfo>,
+        Option<EventTypeInfo<'a>>,
+        Option<u64>,
+    ) {
         (self.op, self.sequence, self.event_type, self.guild_id)
     }
 
@@ -126,37 +133,55 @@ impl<'a> GatewayEvent<'a> {
         T::from_str(clean).ok().map(|int| (int, range))
     }
 
-    /// Find guild_id in the payload. Discord sends snowflakes as strings,
-    /// so we need to handle both `"guild_id":"123"` and `"guild_id":123`.
-    /// 
-    /// This searches for guild_id within the "d" (data) object of the payload.
-    /// Most guild events have guild_id at the top level of "d".
-    fn find_guild_id(input: &'a str) -> Option<u64> {
-        // Look for "guild_id" key
-        let key = r#""guild_id":"#;
-        let from = input.find(key)? + key.len();
-        
-        // Skip whitespace
-        let rest = input.get(from..)?;
-        let first_non_ws = rest.find(|c: char| !c.is_whitespace())?;
-        let start = from + first_non_ws;
-        
-        let first_char = input.as_bytes().get(start).copied()?;
-        
-        if first_char == b'"' {
-            // String value: "guild_id":"123456789"
-            let value_start = start + 1;
-            let value_end = input.get(value_start..)?.find('"')? + value_start;
-            let value = input.get(value_start..value_end)?;
-            u64::from_str(value).ok()
-        } else if first_char == b'n' {
-            // null value
-            None
-        } else {
-            // Numeric value: "guild_id":123456789
-            let to = input.get(start..)?.find(&[',', '}', ' ', '\n'] as &[_])?;
-            let value = input.get(start..start + to)?;
-            u64::from_str(value).ok()
+    fn find_data_field_u64(input: &'a str, field: &str) -> Option<u64> {
+        let data_start = input.find("\"d\":")?;
+        let data_slice = input.get(data_start..)?;
+
+        let key = format!(r#""{field}""#);
+        let key_start = data_slice.find(&key)?;
+        let key_end = key_start + key.len();
+        let after_key = data_slice.get(key_end..)?;
+        let colon_pos = after_key.find(':')?;
+        let after_colon = after_key.get(colon_pos + 1..)?;
+        let ws_offset = after_colon.find(|c: char| !c.is_whitespace())?;
+        let value = after_colon.get(ws_offset..)?;
+
+        let first = value.as_bytes().first().copied()?;
+
+        if first == b'"' {
+            let value_end = value.get(1..)?.find('"')? + 1;
+            return value.get(1..value_end)?.parse().ok();
         }
+
+        if first == b'n' {
+            return None;
+        }
+
+        let value_end = value
+            .find(|c: char| c == ',' || c == '}' || c.is_whitespace())
+            .unwrap_or(value.len());
+        value.get(..value_end)?.parse().ok()
+    }
+
+    /// Find the guild snowflake used for event routing.
+    ///
+    /// Most dispatch events include `d.guild_id`. Guild lifecycle events use
+    /// `d.id` as the guild identifier.
+    fn find_guild_id(input: &'a str, event_type: Option<&EventTypeInfo<'_>>) -> Option<u64> {
+        if let Some(guild_id) = Self::find_data_field_u64(input, "guild_id") {
+            return Some(guild_id);
+        }
+
+        let Some(event_type_info) = event_type else {
+            return None;
+        };
+
+        let event_name = event_type_info.0;
+
+        if matches!(event_name, "GUILD_CREATE" | "GUILD_DELETE" | "GUILD_UPDATE") {
+            return Self::find_data_field_u64(input, "id");
+        }
+
+        None
     }
 }

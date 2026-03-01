@@ -50,7 +50,7 @@ impl Guilds {
     }
 
     /// Get a READY payload for the client.
-    /// 
+    ///
     /// If `authorized_guilds` is Some, only those guilds are included in the READY.
     /// If `authorized_guilds` is None, all guilds are included (original behavior).
     pub fn get_ready_payload(
@@ -350,7 +350,7 @@ impl Guilds {
     }
 
     /// Get GUILD_CREATE/GUILD_DELETE payloads for the client.
-    /// 
+    ///
     /// If `authorized_guilds` is Some, only those guilds are included.
     /// If `authorized_guilds` is None, all guilds are included (original behavior).
     pub fn get_guild_payloads<'a>(

@@ -7,8 +7,11 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{LazyLock, RwLock},
-    time::Duration,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock, RwLock,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tracing::{error, info, warn};
@@ -20,15 +23,56 @@ use crate::config::{ClientConfig, CONFIG};
 pub static CLIENTS: LazyLock<RwLock<HashMap<String, ClientConfig>>> =
     LazyLock::new(|| RwLock::new(CONFIG.clients.clone()));
 
+const CLIENT_DATA_STALE_AFTER_SECS: u64 = 30;
+static LAST_SUCCESSFUL_POLL_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn unix_now_secs() -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    Some(now.as_secs())
+}
+
+fn mark_poll_success() {
+    if let Some(now_secs) = unix_now_secs() {
+        LAST_SUCCESSFUL_POLL_UNIX_SECS.store(now_secs, Ordering::Relaxed);
+    }
+}
+
+fn should_reject_stale_client_data() -> bool {
+    if std::env::var("DATABASE_URL").is_err() {
+        return false;
+    }
+
+    let last_success = LAST_SUCCESSFUL_POLL_UNIX_SECS.load(Ordering::Relaxed);
+    if last_success == 0 {
+        // Database polling is configured but has not succeeded yet.
+        // Keep startup compatibility with config-seeded clients.
+        return false;
+    }
+
+    let Some(now_secs) = unix_now_secs() else {
+        return false;
+    };
+
+    now_secs.saturating_sub(last_success) > CLIENT_DATA_STALE_AFTER_SECS
+}
+
 /// Authenticate a WebSocket client by "client_id:secret" token.
-/// Returns the set of authorized guild IDs if authentication succeeds.
-pub fn authenticate_client(token: &str) -> Option<HashSet<u64>> {
+/// Returns the client ID and the set of authorized guild IDs if authentication succeeds.
+pub fn authenticate_client_with_id(token: &str) -> Option<(String, HashSet<u64>)> {
+    if should_reject_stale_client_data() {
+        warn!(
+            "Rejecting client authentication because database client data is stale (> {}s)",
+            CLIENT_DATA_STALE_AFTER_SECS
+        );
+        return None;
+    }
+
     let (client_id, secret) = token.split_once(':')?;
     let clients = CLIENTS.read().ok()?;
     let client = clients.get(client_id)?;
 
     if client.secret == secret {
-        Some(client.guilds.clone())
+        Some((client_id.to_string(), client.guilds.clone()))
     } else {
         None
     }
@@ -43,8 +87,7 @@ CREATE TABLE IF NOT EXISTS gateway_clients (
     PRIMARY KEY (client_id, guild_id)
 )";
 
-const SELECT_CLIENTS_SQL: &str =
-    "SELECT client_id, secret, guild_id FROM gateway_clients";
+const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id FROM gateway_clients";
 
 /// Start polling the database for client config updates.
 /// Reconnects automatically on connection failure.
@@ -77,6 +120,7 @@ async fn run_poll_loop(database_url: &str) -> Result<(), tokio_postgres::Error> 
 
     loop {
         let new_clients = poll_clients(&client).await?;
+        mark_poll_success();
 
         if let Ok(mut clients) = CLIENTS.write() {
             *clients = new_clients;
@@ -111,9 +155,7 @@ async fn poll_clients(
             .entry(client_id.clone())
             .and_modify(|c| {
                 if c.secret != secret {
-                    warn!(
-                        "Conflicting secrets for client '{client_id}', using first seen"
-                    );
+                    warn!("Conflicting secrets for client '{client_id}', using first seen");
                 }
                 c.guilds.insert(guild_id);
             })

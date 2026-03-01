@@ -12,6 +12,8 @@ use twilight_cache_inmemory::ResourceType;
 use twilight_gateway::{EventTypeFlags, Intents};
 use twilight_model::gateway::presence::{Activity, Status};
 
+#[cfg(target_os = "linux")]
+use std::str::FromStr;
 use std::{
     collections::{HashMap, HashSet},
     env::var,
@@ -20,8 +22,6 @@ use std::{
     process::exit,
     sync::LazyLock,
 };
-#[cfg(target_os = "linux")]
-use std::str::FromStr;
 
 /// Configuration for a client that can connect to the proxy.
 /// Each client has a secret token and a list of guild IDs they're authorized to receive events for.
