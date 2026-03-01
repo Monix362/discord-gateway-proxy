@@ -3,6 +3,7 @@
 > This is a very hacky project, so it might stop working if Discord changes their API core. This is unlikely, but keep that in mind while using the proxy.
 
 This is a proxy for Discord gateway connections - clients can connect to this proxy instead of the Discord Gateway and interact with it just like they would with the Discord Gateway.
+It also exposes a Discord REST proxy at `/api/v10/*` using the same auth model as gateway connections.
 
 The proxy connects to Discord instead of the client - allowing for zero-downtime client restarts while the proxy keeps its connections to the gateway open. The proxy won't invalidate your sessions or disconnect you (exceptions below).
 
@@ -125,6 +126,23 @@ Guild IDs can be strings or numbers in the config.
 Events without a `guild_id` (DMs, USER_UPDATE, etc.) are **not forwarded** to multi-tenant clients since they can't be attributed to a specific guild.
 
 **Backward compatibility:** Clients connecting with the real bot token (or `Bot YOUR_TOKEN`) get all events for all guilds, same as before. The `clients` config is optional -- omitting it preserves the original single-client behavior.
+
+## REST proxy mode (`/api/v10/*`)
+
+The proxy forwards Discord REST requests to `https://discord.com/api/v10/*`.
+
+Authentication is shared with gateway auth:
+
+- `Authorization: Bot <real_bot_token>` → full access (legacy behavior)
+- `Authorization: Bot <client_id:client_secret>` → multi-tenant client access
+
+For multi-tenant client credentials, REST requests are guild-scoped:
+
+- Routes with `guild_id` are allowed only when that guild is in the client's authorized guild set.
+- Channel routes are resolved to a guild via the proxy cache and filtered the same way.
+- Routes without a resolvable guild context are denied unless they are explicitly required for client operation (for example `/api/v10/gateway/bot`).
+
+`GET /api/v10/gateway/bot` rewrites the returned `url` field to the proxy's configured external URL so clients auto-discover the gateway proxy.
 
 ## Dynamic client config (database)
 

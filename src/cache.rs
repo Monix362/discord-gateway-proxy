@@ -49,6 +49,26 @@ impl Guilds {
         self.0.stats()
     }
 
+    pub fn resolve_guild_id_for_channel(&self, channel_id: u64) -> Option<u64> {
+        self.0.iter().guilds().find_map(|guild| {
+            let has_channel = self
+                .0
+                .guild_channels(guild.id())
+                .map(|channels| {
+                    channels
+                        .iter()
+                        .any(|cached_channel_id| cached_channel_id.get() == channel_id)
+                })
+                .unwrap_or(false);
+
+            if has_channel {
+                Some(guild.id().get())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get a READY payload for the client.
     ///
     /// If `authorized_guilds` is Some, only those guilds are included in the READY.

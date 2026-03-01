@@ -25,15 +25,13 @@ use tokio::{
 use tokio_websockets::{Error, Limits, Message, ServerBuilder};
 use tracing::{debug, error, info, trace, warn};
 
-use std::{
-    collections::HashSet, convert::Infallible, future::ready, net::SocketAddr, sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashSet, convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
-    config::CONFIG,
+    auth,
     deserializer::{GatewayEvent, SequenceInfo},
     model::{Identify, Resume},
+    rest_proxy,
     state::{Session, SessionPrincipal, Shard, State},
     upgrade,
 };
@@ -44,40 +42,6 @@ const INVALID_SESSION: &str = r#"{"t":null,"s":null,"op":9,"d":false}"#;
 const RESUMED: &str = r#"{"t":"RESUMED","s":null,"op":0,"d":{}}"#;
 
 const TRAILER: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
-
-struct AuthContext {
-    principal: SessionPrincipal,
-    authorized_guilds: Option<Arc<HashSet<u64>>>,
-}
-
-fn normalize_gateway_token(token: &str) -> &str {
-    token.split_whitespace().last().unwrap_or("")
-}
-
-fn authenticate_gateway_token(token: &str) -> Option<AuthContext> {
-    if let Some((client_id, guilds)) = crate::db_config::authenticate_client_with_id(token) {
-        return Some(AuthContext {
-            principal: SessionPrincipal::Client(client_id),
-            authorized_guilds: Some(Arc::new(guilds)),
-        });
-    }
-
-    if token == CONFIG.token {
-        return Some(AuthContext {
-            principal: SessionPrincipal::BotToken,
-            authorized_guilds: None,
-        });
-    }
-
-    if CONFIG.validate_token {
-        return None;
-    }
-
-    Some(AuthContext {
-        principal: SessionPrincipal::Unvalidated(token.to_string()),
-        authorized_guilds: None,
-    })
-}
 
 fn compress_full(compressor: &mut Compress, output: &mut Vec<u8>, input: &[u8]) {
     let before_in = compressor.total_in() as usize;
@@ -344,8 +308,8 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     break;
                 }
 
-                let client_token = normalize_gateway_token(&identify.d.token);
-                let Some(auth) = authenticate_gateway_token(client_token) else {
+                let client_token = auth::normalize_gateway_token(&identify.d.token);
+                let Some(auth) = auth::authenticate_gateway_token(client_token) else {
                     warn!("[{addr}] Token from client mismatched and not a valid client, disconnecting");
                     break;
                 };
@@ -399,8 +363,8 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     }
                 };
 
-                let client_token = normalize_gateway_token(&resume.d.token);
-                let Some(resume_auth) = authenticate_gateway_token(client_token) else {
+                let client_token = auth::normalize_gateway_token(&resume.d.token);
+                let Some(resume_auth) = auth::authenticate_gateway_token(client_token) else {
                     warn!("[{addr}] Token from client mismatched, disconnecting");
                     break;
                 };
@@ -467,12 +431,16 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
     Ok(())
 }
 
-fn handler(
+async fn handler(
     addr: SocketAddr,
     request: Request<Incoming>,
     state: State,
     metrics: &PrometheusHandle,
 ) -> Response<Full<Bytes>> {
+    if request.uri().path().starts_with("/api/v10/") || request.uri().path().starts_with("/v10/") {
+        return rest_proxy::handle_rest_request(request, state).await;
+    }
+
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/metrics") => Response::builder()
             .status(StatusCode::OK)
@@ -525,12 +493,13 @@ pub async fn run(port: u16, state: State, metrics_handle: PrometheusHandle) -> R
                 .serve_connection_with_upgrades(
                     TokioIo::new(conn),
                     service_fn(move |incoming: Request<Incoming>| {
-                        ready(Ok::<_, Infallible>(handler(
-                            addr,
-                            incoming,
-                            state.clone(),
-                            &metrics_handle,
-                        )))
+                        let state = state.clone();
+                        let metrics_handle = metrics_handle.clone();
+                        async move {
+                            Ok::<_, Infallible>(
+                                handler(addr, incoming, state, &metrics_handle).await,
+                            )
+                        }
                     }),
                 )
                 .await

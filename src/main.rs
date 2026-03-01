@@ -38,12 +38,14 @@ use std::{
 
 use crate::config::CONFIG;
 
+mod auth;
 mod cache;
 mod config;
 mod db_config;
 mod deserializer;
 mod dispatch;
 mod model;
+mod rest_proxy;
 mod server;
 mod state;
 mod upgrade;

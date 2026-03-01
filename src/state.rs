@@ -141,6 +141,12 @@ impl Inner {
             return session_id;
         }
     }
+
+    pub fn resolve_guild_id_for_channel(&self, channel_id: u64) -> Option<u64> {
+        self.shards
+            .iter()
+            .find_map(|shard| shard.guilds.resolve_guild_id_for_channel(channel_id))
+    }
 }
 
 /// A reference to the [`StateInner`] of the proxy.
