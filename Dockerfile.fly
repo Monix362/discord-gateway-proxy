@@ -1,0 +1,5 @@
+# Minimal image for deploying a pre-built static musl binary to fly.io.
+# Build the binary locally with cross-compilation before running fly deploy.
+FROM --platform=linux/amd64 scratch
+COPY target/x86_64-unknown-linux-musl/release/gateway-proxy /gateway-proxy
+CMD ["./gateway-proxy"]

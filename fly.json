@@ -1,0 +1,24 @@
+{
+  "$schema": "https://www.schemastore.org/fly.json",
+  "app": "kimaki-gateway-production",
+  "primary_region": "iad",
+  "build": {
+    "dockerfile": "Dockerfile.fly"
+  },
+  "http_service": {
+    "internal_port": 7878,
+    "force_https": true,
+    "auto_stop_machines": false,
+    "auto_start_machines": true,
+    "min_machines_running": 1
+  },
+  "checks": {
+    "health": {
+      "type": "http",
+      "port": 7878,
+      "path": "/metrics",
+      "interval": "15s",
+      "timeout": "5s"
+    }
+  }
+}

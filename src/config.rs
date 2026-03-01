@@ -319,11 +319,37 @@ pub fn load(path: &str) -> Result<Config, Error> {
     Ok(config)
 }
 
+/// Parse config from a JSON string.
+/// Used when config is provided via the CONFIG env var instead of a file.
+#[cfg(feature = "simd-json")]
+pub fn load_from_str(json: &mut String) -> Result<Config, Error> {
+    let config = unsafe { simd_json::from_str(json) }.map_err(Error::InvalidConfig)?;
+    Ok(config)
+}
+
+#[cfg(not(feature = "simd-json"))]
+pub fn load_from_str(json: &mut String) -> Result<Config, Error> {
+    let config = serde_json::from_str(json).map_err(Error::InvalidConfig)?;
+    Ok(config)
+}
+
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
+    // If CONFIG env var is set, parse it as JSON directly instead of reading config.json.
+    // This is useful for containerized deployments (fly.io, Docker) where mounting
+    // a config file is inconvenient and secrets/env vars are the standard approach.
+    if let Ok(mut config_json) = var("CONFIG") {
+        match load_from_str(&mut config_json) {
+            Ok(config) => return config,
+            Err(err) => {
+                eprintln!("Config Error (from CONFIG env var): {err}");
+                exit(1);
+            }
+        }
+    }
+
     match load("config.json") {
         Ok(config) => config,
         Err(err) => {
-            // Avoid panicking
             eprintln!("Config Error: {err}");
             exit(1);
         }
