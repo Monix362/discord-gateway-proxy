@@ -24,12 +24,14 @@ const gatewayConfig = {
     intents: 32511,
     externally_accessible_url: `wss://${appName}.fly.dev`,
     cache: {
-        channels: false,
+        // Channels, roles, and current_member are needed so the synthetic
+        // READY event includes guild data for built-in bot mode clients.
+        channels: true,
+        roles: true,
+        current_member: true,
         presences: false,
         emojis: false,
-        current_member: false,
         members: false,
-        roles: false,
         scheduled_events: false,
         stage_instances: false,
         stickers: false,
@@ -45,6 +47,10 @@ async function main() {
 
     if (!env.DISCORD_BOT_TOKEN) {
         throw new Error('DISCORD_BOT_TOKEN not found in Doppler')
+    }
+
+    if (!env.DATABASE_URL) {
+        throw new Error('DATABASE_URL not found in Doppler')
     }
 
     const config = {
