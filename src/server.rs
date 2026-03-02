@@ -431,6 +431,52 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
     Ok(())
 }
 
+const LANDING_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimaki Gateway</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0a0a0a;
+    color: #e5e5e5;
+  }
+  .container {
+    text-align: center;
+    padding: 2rem;
+  }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+  p {
+    font-size: 0.95rem;
+    color: #888;
+  }
+  a {
+    color: #e5e5e5;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  a:hover { color: #fff; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Discord Gateway Proxy</h1>
+  <p><a href="https://kimaki.xyz">kimaki.xyz</a></p>
+</div>
+</body>
+</html>"#;
+
 async fn handler(
     addr: SocketAddr,
     request: Request<Incoming>,
@@ -455,8 +501,20 @@ async fn handler(
                 .body(Full::from(shard_count_str.to_string()))
                 .unwrap()
         }
-        // Usually one would return a 404 here, but we will just provide the websocket
-        // upgrade for backwards compatibility.
+        (&Method::GET, "/") => {
+            // Landing page — only served for plain HTTP requests (no websocket upgrade header).
+            // Websocket clients hitting / still get the upgrade via the fallback arm.
+            if request.headers().contains_key("upgrade") {
+                upgrade::server(addr, request, state)
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(Full::from(LANDING_HTML))
+                    .unwrap()
+            }
+        }
+        // Provide websocket upgrade for any other path (backwards compatibility).
         _ => upgrade::server(addr, request, state),
     }
 }
