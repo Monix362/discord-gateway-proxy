@@ -231,51 +231,48 @@ Using 225 shards, with almost full caching (members, guilds, channels, roles, vo
 When used with [kimaki](https://kimaki.xyz), the proxy enables a zero-config onboarding experience where users install a shared Discord bot without creating their own.
 
 ```
-  User's terminal                    Browser                       Website (CF Worker)             Postgres              Gateway Proxy
-  ──────────────                     ───────                       ──────────────────              ────────              ─────────────
-       │                                │                                │                           │                       │
-  1.   │ npx kimaki                     │                                │                           │                       │
-       │                                │                                │                           │                       │
-  2.   │ generate clientId (UUID)       │                                │                           │                       │
-       │ generate clientSecret (hex)    │                                │                           │                       │
-       │                                │                                │                           │                       │
-  3.   │ build Discord OAuth URL:       │                                │                           │                       │
-       │   client_id = SHARED_APP_ID    │                                │                           │                       │
-       │   state = {clientId,secret}    │                                │                           │                       │
-       │   redirect_uri = /oauth/cb     │                                │                           │                       │
-       │                                │                                │                           │                       │
-  4.   │──── open browser ─────────────>│                                │                           │                       │
-       │                                │ discord.com/oauth2/authorize   │                           │                       │
-       │                                │ user picks guild, clicks OK    │                           │                       │
-       │                                │                                │                           │                       │
-  5.   │                                │── redirect with guild_id ─────>│                           │                       │
-       │                                │   + state                      │                           │                       │
-       │                                │                                │                           │                       │
-  6.   │                                │                                │── upsert ────────────────>│                       │
-       │                                │                                │   gateway_clients row      │                       │
-       │                                │                                │   (client_id, secret,      │                       │
-       │                                │                                │    guild_id)               │                       │
-       │                                │                                │                           │                       │
-  7.   │                                │<── "you can close this tab" ───│                           │                       │
-       │                                │                                │                           │                       │
-  8.   │ poll /api/onboarding/status    │                                │                           │                       │
-       │ every 2s with clientId+secret  │                                │                           │                       │
-       │                                │                                │                           │                       │
-  9.   │<──────────────── { guild_id } ─────────────────────────────────-│<── findFirst ────────────-│                       │
-       │                                │                                │                           │                       │
- 10.   │ store creds in local SQLite    │                                │                           │                       │
-       │ bot_mode = "built-in"          │                                │                           │                       │
-       │                                │                                │                           │                       │
- 11.   │ connect to gateway proxy       │                                │                           │                       │
-       │ IDENTIFY token =              │                                │                           │                       │
-       │   clientId:clientSecret        │                                │                           │ polls DB every 1s     │
-       │                                │                                │                           │────── new client ────>│
-       │                                │                                │                           │       in map          │
-       │                                │                                │                           │                       │
- 12.   │<──────────────────────────────────────────────────────────────────────── READY (filtered) ──│
-       │                                │                                │                           │                       │
- 13.   │ bot is live, receiving events  │                                │                           │                       │
-       │ only for authorized guild      │                                │                           │                       │
+User's terminal                          Browser       Website (CF Worker)  Postgres    Gateway Proxy
+───────────────                          ───────       ───────────────────  ────────    ─────────────
+       │                                    │                   │               │             │
+ 1.    │ npx kimaki                         │                   │               │             │
+       │                                    │                   │               │             │
+ 2.    │ generate clientId (UUID)           │                   │               │             │
+       │   + clientSecret (hex)             │                   │               │             │
+       │                                    │                   │               │             │
+ 3.    │ build Discord OAuth URL:           │                   │               │             │
+       │   client_id = SHARED_APP_ID        │                   │               │             │
+       │   state = {clientId, secret}       │                   │               │             │
+       │   redirect_uri = /oauth/cb         │                   │               │             │
+       │                                    │                   │               │             │
+ 4.    ├────────── open browser ───────────▶│                   │               │             │
+       │                      discord.com/oauth2/authorize      │               │             │
+       │                       user picks guild, clicks OK      │               │             │
+       │                                    │                   │               │             │
+ 5.    │                                    ├ redirect + state ▶│               │             │
+       │                                    │                   │               │             │
+ 6.    │                                    │                   ├─── upsert ───▶│             │
+       │                                    │                   │ gateway_clients row         │
+       │                                    │                   │ (client_id, secret, guild_id)
+       │                                    │                   │               │             │
+ 7.    │                                    │◀ close this tab ──┤               │             │
+       │                                    │                   │               │             │
+ 8.    │ poll /api/onboarding/status        │                   │               │             │
+       │   every 2s (clientId+secret)       │                   │               │             │
+       │                                    │                   │               │             │
+ 9.    │                                    │                   ├── findFirst ─▶│             │
+       │◀─────────────────── { guild_id } ──────────────────────┤               │             │
+       │                                    │                   │               │             │
+10.    │ store creds in local SQLite        │                   │               │             │
+       │   bot_mode = built-in              │                   │               │             │
+       │                                    │                   │               │             │
+11.    │ connect to gateway proxy           │                   │               │             │
+       ├────────────────────────── IDENTIFY clientId:clientSecret ───────────────────────────▶│
+       │                                    │                   │               ├ polls DB 1s▶│
+       │                                    │                   │               │             │
+12.    │◀──────────────────────────── READY (filtered to guild) ──────────────────────────────┤
+       │                                    │                   │               │             │
+13.    │ bot is live, events for guild only │                   │               │             │
+       │                                    │                   │               │             │
 ```
 
 **Step by step:**
