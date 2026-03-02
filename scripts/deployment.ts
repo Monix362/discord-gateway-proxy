@@ -25,7 +25,7 @@ const gatewayConfig = {
     externally_accessible_url: 'wss://discord-gateway.kimaki.xyz',
     cache: {
         // Channels, roles, and current_member are needed so the synthetic
-        // READY event includes guild data for built-in bot mode clients.
+        // READY event includes guild data for gateway bot mode clients.
         channels: true,
         roles: true,
         current_member: true,
