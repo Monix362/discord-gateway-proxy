@@ -226,6 +226,87 @@ In theory, the proxy is very fast for the reasons mentioned above. In practice, 
 
 Using 225 shards, with almost full caching (members, guilds, channels, roles, voice states) the proxy uses 11.7GB of memory and sits around 2% CPU usage over all 4c/8t of my machine. This again shows that the processing overhead is negligible, the only thing you can and should optimize on is the cache configuration.
 
+## Kimaki onboarding flow
+
+When used with [kimaki](https://kimaki.xyz), the proxy enables a zero-config onboarding experience where users install a shared Discord bot without creating their own.
+
+```
+  User's terminal                    Browser                       Website (CF Worker)             Postgres              Gateway Proxy
+  ──────────────                     ───────                       ──────────────────              ────────              ─────────────
+       │                                │                                │                           │                       │
+  1.   │ npx kimaki                     │                                │                           │                       │
+       │                                │                                │                           │                       │
+  2.   │ generate clientId (UUID)       │                                │                           │                       │
+       │ generate clientSecret (hex)    │                                │                           │                       │
+       │                                │                                │                           │                       │
+  3.   │ build Discord OAuth URL:       │                                │                           │                       │
+       │   client_id = SHARED_APP_ID    │                                │                           │                       │
+       │   state = {clientId,secret}    │                                │                           │                       │
+       │   redirect_uri = /oauth/cb     │                                │                           │                       │
+       │                                │                                │                           │                       │
+  4.   │──── open browser ─────────────>│                                │                           │                       │
+       │                                │ discord.com/oauth2/authorize   │                           │                       │
+       │                                │ user picks guild, clicks OK    │                           │                       │
+       │                                │                                │                           │                       │
+  5.   │                                │── redirect with guild_id ─────>│                           │                       │
+       │                                │   + state                      │                           │                       │
+       │                                │                                │                           │                       │
+  6.   │                                │                                │── upsert ────────────────>│                       │
+       │                                │                                │   gateway_clients row      │                       │
+       │                                │                                │   (client_id, secret,      │                       │
+       │                                │                                │    guild_id)               │                       │
+       │                                │                                │                           │                       │
+  7.   │                                │<── "you can close this tab" ───│                           │                       │
+       │                                │                                │                           │                       │
+  8.   │ poll /api/onboarding/status    │                                │                           │                       │
+       │ every 2s with clientId+secret  │                                │                           │                       │
+       │                                │                                │                           │                       │
+  9.   │<──────────────── { guild_id } ─────────────────────────────────-│<── findFirst ────────────-│                       │
+       │                                │                                │                           │                       │
+ 10.   │ store creds in local SQLite    │                                │                           │                       │
+       │ bot_mode = "built-in"          │                                │                           │                       │
+       │                                │                                │                           │                       │
+ 11.   │ connect to gateway proxy       │                                │                           │                       │
+       │ IDENTIFY token =              │                                │                           │                       │
+       │   clientId:clientSecret        │                                │                           │ polls DB every 1s     │
+       │                                │                                │                           │────── new client ────>│
+       │                                │                                │                           │       in map          │
+       │                                │                                │                           │                       │
+ 12.   │<──────────────────────────────────────────────────────────────────────── READY (filtered) ──│
+       │                                │                                │                           │                       │
+ 13.   │ bot is live, receiving events  │                                │                           │                       │
+       │ only for authorized guild      │                                │                           │                       │
+```
+
+**Step by step:**
+
+1. User runs `npx kimaki` on their machine
+2. CLI generates a unique `clientId` (UUID v4) and `clientSecret` (32-byte random hex)
+3. CLI builds a Discord OAuth URL with the shared Kimaki bot's `client_id`, a `state` param containing the generated credentials as JSON, and `redirect_uri` pointing to the website
+4. CLI opens the browser to the Discord authorize page
+5. User picks a guild and authorizes — Discord redirects to `website/src/routes/oauth-callback.tsx` with `guild_id` and `state`
+6. Website parses the state, upserts a `gateway_clients` row in Postgres with `(client_id, secret, guild_id)`
+7. Browser shows a success page
+8. CLI polls `GET /api/onboarding/status?client_id=...&secret=...` every 2 seconds
+9. Website finds the row and returns `{ guild_id }`
+10. CLI stores credentials in local SQLite (`bot_mode = "built-in"`)
+11. Bot connects to the gateway proxy using `clientId:clientSecret` as the token
+12. Proxy authenticates against its in-memory client map (refreshed from DB every 1s), sends a filtered READY containing only the authorized guild
+13. Bot is live — all gateway events and REST requests are scoped to that guild
+
+## Multiple users in the same guild
+
+Multiple users can install the bot to the same guild independently. Each user gets their own `client_id` and `client_secret`, creating separate rows in `gateway_clients`:
+
+| client_id | secret | guild_id |
+|-----------|--------|----------|
+| `aaa-111` | `secret_a` | `999888777` |
+| `bbb-222` | `secret_b` | `999888777` |
+
+The composite primary key `(client_id, guild_id)` ensures rows never collide across users. The proxy groups rows by `client_id` when building the client map, so each user authenticates independently and receives their own event stream — both filtered to the same guild.
+
+Discord only has one bot installation per guild (the shared Kimaki bot), but the proxy multiplexes events to all clients authorized for that guild.
+
 ## Known Issues / TODOs
 
 - Re-add voice support
