@@ -22,7 +22,7 @@ const appName = 'kimaki-gateway-production'
 const gatewayConfig = {
     log_level: 'info',
     intents: 32511,
-    externally_accessible_url: `wss://${appName}.fly.dev`,
+    externally_accessible_url: 'wss://discord-gateway.kimaki.xyz',
     cache: {
         // Channels, roles, and current_member are needed so the synthetic
         // READY event includes guild data for built-in bot mode clients.
