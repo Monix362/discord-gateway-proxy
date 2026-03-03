@@ -89,9 +89,20 @@ CREATE TABLE IF NOT EXISTS gateway_clients (
 
 const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id FROM gateway_clients";
 
+/// Normalize a DATABASE_URL for tokio-postgres compatibility.
+/// tokio-postgres only supports sslmode values: disable, prefer, require.
+/// PlanetScale (and others) often emit sslmode=verify-full or verify-ca,
+/// which tokio-postgres rejects as "invalid connection string".
+/// We downgrade those to sslmode=require so the connection succeeds.
+fn normalize_database_url(url: &str) -> String {
+    url.replace("sslmode=verify-full", "sslmode=require")
+        .replace("sslmode=verify-ca", "sslmode=require")
+}
+
 /// Start polling the database for client config updates.
 /// Reconnects automatically on connection failure.
 pub async fn start_polling(database_url: String) {
+    let database_url = normalize_database_url(&database_url);
     info!("Starting database config polling");
 
     loop {
@@ -106,7 +117,15 @@ pub async fn start_polling(database_url: String) {
 }
 
 async fn run_poll_loop(database_url: &str) -> Result<(), tokio_postgres::Error> {
-    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls).await?;
+    // PlanetScale requires TLS. Build a rustls connector with Mozilla root CAs
+    // so sslmode=require (or higher) works.
+    let root_store = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let rustls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+
+    let (client, connection) = tokio_postgres::connect(database_url, tls).await?;
 
     // The connection object runs the actual I/O; must be spawned.
     tokio::spawn(async move {
