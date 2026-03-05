@@ -21,6 +21,7 @@ use crate::{
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
+#[derive(Debug)]
 enum RouteScope {
     Guild(u64),
     Channel(u64),
@@ -271,7 +272,10 @@ pub async fn handle_rest_request(
         .unwrap_or("");
 
     let Some(auth_context) = auth::authenticate_gateway_token(auth_header) else {
-        warn!("REST auth rejected: missing or invalid credentials");
+        warn!(
+            "REST auth rejected: missing or invalid credentials: path={}",
+            normalized_path
+        );
         return json_error(StatusCode::UNAUTHORIZED, "Invalid or missing credentials");
     };
 
@@ -279,6 +283,10 @@ pub async fn handle_rest_request(
 
     if matches!(auth_context.principal, SessionPrincipal::Client(_)) {
         let Some(authorized_guilds) = auth_context.authorized_guilds.as_deref() else {
+            warn!(
+                "REST auth rejected: missing guild authorization: path={}",
+                normalized_path
+            );
             return json_error(StatusCode::FORBIDDEN, "Missing guild authorization");
         };
 
@@ -302,7 +310,10 @@ pub async fn handle_rest_request(
                 );
             }
         } else if !is_client_authorized_for_route(authorized_guilds, &scope) {
-            warn!("REST auth rejected route scope: path={}", normalized_path);
+            warn!(
+                "REST auth rejected route scope: path={}, scope={:?}",
+                normalized_path, scope
+            );
             return json_error(
                 StatusCode::FORBIDDEN,
                 "REST route is outside the authorized guild scope",
