@@ -1,6 +1,8 @@
 {
   "private": true,
   "scripts": {
+    "build": "doppler run -- cargo build",
+    "dev": "doppler run -- tsx scripts/dev.ts",
     "build:linux": "CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar CFLAGS_x86_64_unknown_linux_musl='-march=haswell' cargo +nightly build --release --target x86_64-unknown-linux-musl && x86_64-linux-musl-strip target/x86_64-unknown-linux-musl/release/gateway-proxy",
     "fly": "fly --app kimaki-gateway-production",
     "deploy": "tsx scripts/deployment.ts"

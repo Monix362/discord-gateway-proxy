@@ -180,10 +180,13 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     });
 
-    // If DATABASE_URL is set, poll the database for dynamic client config.
-    // This replaces config.json clients with database-managed clients,
+    // If DIRECT_DATABASE_URL (or DATABASE_URL fallback) is set,
+    // sync dynamic client config from the database.
+    // Prefers LISTEN/NOTIFY incremental updates with fallback polling,
     // allowing new guilds to be added at runtime without restarting.
-    if let Ok(database_url) = std::env::var("DATABASE_URL") {
+    let database_url =
+        std::env::var("DIRECT_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"));
+    if let Ok(database_url) = database_url {
         tokio::spawn(db_config::start_polling(database_url));
     }
 

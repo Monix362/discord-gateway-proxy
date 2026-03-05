@@ -49,8 +49,11 @@ async function main() {
         throw new Error('DISCORD_BOT_TOKEN not found in Doppler')
     }
 
-    if (!env.DATABASE_URL) {
-        throw new Error('DATABASE_URL not found in Doppler')
+    const directDatabaseUrl = env.DIRECT_DATABASE_URL || env.DATABASE_URL
+    if (!directDatabaseUrl) {
+        throw new Error(
+            'DIRECT_DATABASE_URL (or DATABASE_URL fallback) not found in Doppler',
+        )
     }
 
     const config = {
@@ -76,6 +79,7 @@ async function main() {
         regions: ['iad'],
         env: {
             ...env,
+            DIRECT_DATABASE_URL: directDatabaseUrl,
             CONFIG: JSON.stringify(config),
         },
     })

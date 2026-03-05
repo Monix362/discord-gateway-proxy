@@ -146,10 +146,10 @@ For multi-tenant client credentials, REST requests are guild-scoped:
 
 ## Dynamic client config (database)
 
-For deployments where clients/guilds change at runtime (e.g. when users install the bot in new servers), set the `DATABASE_URL` environment variable to a Postgres connection string. The proxy will poll the database every second and update the client map without restarting.
+For deployments where clients/guilds change at runtime (e.g. when users install the bot in new servers), set `DIRECT_DATABASE_URL` to a Postgres connection string (preferred), with `DATABASE_URL` as fallback. The proxy loads the full table once, then listens for row-level changes with `LISTEN/NOTIFY` and applies incremental updates. It keeps a low-frequency full reconcile as a safety net, and falls back to polling mode if `LISTEN/NOTIFY` is unavailable.
 
 ```bash
-DATABASE_URL=postgres://user:pass@host/db ./gateway-proxy
+DIRECT_DATABASE_URL=postgres://user:pass@host:5432/db ./gateway-proxy
 ```
 
 The table is created automatically on first connection. One row per client+guild pair:
@@ -188,7 +188,9 @@ model GatewayClient {
 | us-east | random-secret-us-east | 2222222222222222 |
 | eu-west | random-secret-eu-west | 3333333333333333 |
 
-When `DATABASE_URL` is set, the database becomes the sole source of truth for clients after the first poll. Config.json `clients` are used as the initial seed until then. If `DATABASE_URL` is not set, config.json clients are used as before.
+When `DIRECT_DATABASE_URL` (or `DATABASE_URL` fallback) is set, the database becomes the sole source of truth for clients after the first successful sync. Config.json `clients` are used as the initial seed until then. If neither env var is set, config.json clients are used as before.
+
+The realtime path depends on Postgres session features (`LISTEN/NOTIFY`). With PlanetScale, use a direct Postgres connection on port `5432`. PgBouncer transaction pooling (`6432`) does not support `LISTEN/NOTIFY` semantics.
 
 ## Running
 
@@ -267,7 +269,7 @@ User's terminal                          Browser       Website (CF Worker)  Post
        │                                    │                   │               │             │
 11.    │ connect to gateway proxy           │                   │               │             │
        ├────────────────────────── IDENTIFY clientId:clientSecret ───────────────────────────▶│
-       │                                    │                   │               ├ polls DB 1s▶│
+       │                                    │                   │               ├ LISTEN/NOTIFY▶│
        │                                    │                   │               │             │
 12.    │◀──────────────────────────── READY (filtered to guild) ──────────────────────────────┤
        │                                    │                   │               │             │
@@ -288,7 +290,7 @@ User's terminal                          Browser       Website (CF Worker)  Post
 9. Website finds the row and returns `{ guild_id }`
 10. CLI stores credentials in local SQLite (`bot_mode = "built-in"`)
 11. Bot connects to the gateway proxy using `clientId:clientSecret` as the token
-12. Proxy authenticates against its in-memory client map (refreshed from DB every 1s), sends a filtered READY containing only the authorized guild
+12. Proxy authenticates against its in-memory client map (kept in sync from DB notifications), sends a filtered READY containing only the authorized guild
 13. Bot is live — all gateway events and REST requests are scoped to that guild
 
 ## Multiple users in the same guild
