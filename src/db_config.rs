@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS gateway_clients (
     client_id  TEXT NOT NULL,
     secret     TEXT NOT NULL,
     guild_id   TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (client_id, guild_id)
 )";
