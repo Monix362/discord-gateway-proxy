@@ -81,7 +81,23 @@ fn resolve_route_scope(path: &str) -> RouteScope {
         return RouteScope::AllowedWithoutGuild;
     }
 
-    if route[0] == "interactions" || route[0] == "webhooks" {
+    if route.len() >= 3 && route[0] == "interactions" {
+        let Some(_interaction_id) = parse_snowflake(route[1]) else {
+            return RouteScope::DeniedWithoutGuild;
+        };
+        if route[2].is_empty() {
+            return RouteScope::DeniedWithoutGuild;
+        }
+        return RouteScope::AllowedWithoutAuth;
+    }
+
+    if route.len() >= 3 && route[0] == "webhooks" {
+        let Some(_webhook_id) = parse_snowflake(route[1]) else {
+            return RouteScope::DeniedWithoutGuild;
+        };
+        if route[2].is_empty() {
+            return RouteScope::DeniedWithoutGuild;
+        }
         return RouteScope::AllowedWithoutAuth;
     }
 
@@ -112,6 +128,10 @@ fn is_client_authorized_for_route(authorized_guilds: &HashSet<u64>, scope: &Rout
         RouteScope::AllowedWithoutAuth => true,
         RouteScope::DeniedWithoutGuild => false,
     }
+}
+
+fn should_attach_bot_authorization(scope: &RouteScope, has_auth_context: bool) -> bool {
+    has_auth_context && !matches!(scope, RouteScope::AllowedWithoutAuth)
 }
 
 fn should_skip_request_header(name: &str) -> bool {
@@ -359,7 +379,7 @@ pub async fn handle_rest_request(
         upstream_request = upstream_request.header(name, value);
     }
 
-    if auth_context.is_some() {
+    if should_attach_bot_authorization(&scope, auth_context.is_some()) {
         upstream_request =
             upstream_request.header(AUTHORIZATION.as_str(), format!("Bot {}", CONFIG.token));
     }
@@ -416,4 +436,46 @@ pub async fn handle_rest_request(
     }
 
     build_response(status, response_headers, response_body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_route_scope, should_attach_bot_authorization, RouteScope};
+
+    #[test]
+    fn resolves_tokenized_routes_as_allowed_without_auth() {
+        assert!(matches!(
+            resolve_route_scope("/api/v10/interactions/123456789/token/callback"),
+            RouteScope::AllowedWithoutAuth
+        ));
+        assert!(matches!(
+            resolve_route_scope("/api/v10/webhooks/123456789/token/messages/@original"),
+            RouteScope::AllowedWithoutAuth
+        ));
+    }
+
+    #[test]
+    fn denies_non_tokenized_webhook_routes_without_guild_scope() {
+        assert!(matches!(
+            resolve_route_scope("/api/v10/webhooks/123456789"),
+            RouteScope::DeniedWithoutGuild
+        ));
+        assert!(matches!(
+            resolve_route_scope("/api/v10/interactions/123456789"),
+            RouteScope::DeniedWithoutGuild
+        ));
+    }
+
+    #[test]
+    fn never_attaches_bot_authorization_for_allowed_without_auth_routes() {
+        assert!(!should_attach_bot_authorization(
+            &RouteScope::AllowedWithoutAuth,
+            true,
+        ));
+        assert!(!should_attach_bot_authorization(
+            &RouteScope::AllowedWithoutAuth,
+            false,
+        ));
+        assert!(should_attach_bot_authorization(&RouteScope::AllowedWithoutGuild, true));
+    }
 }

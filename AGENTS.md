@@ -11,6 +11,20 @@ gateway-proxy is a Discord proxy for both **Gateway WebSocket** and
   guild-scoped WS filtering.
 - Exposed operational endpoints: `/metrics`, `/shard-count`.
 
+# multi-tenant REST invariants
+
+gateway-proxy is multi-tenant. a client must never be able to read or mutate
+resources outside its authorized guilds.
+
+- guild resources must be explicitly guild-scoped and checked against
+  `authorized_guilds`.
+- only tokenized interaction/webhook routes can be treated as
+  `AllowedWithoutAuth` (`/interactions/{id}/{token}/...`,
+  `/webhooks/{id}/{token}/...`).
+- never allow `/webhooks/{id}` as an unscoped allowlist route.
+- for `AllowedWithoutAuth`, do not inject bot `Authorization` when forwarding.
+- if route scope cannot be proven, fail closed.
+
 # split with website
 
 Onboarding flows are handled by the `website` package.
