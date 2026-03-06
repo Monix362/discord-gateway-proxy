@@ -33,6 +33,14 @@ const DB_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
 const LISTEN_CHANNEL: &str = "gateway_clients_changed";
 static LAST_SUCCESSFUL_SYNC_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
 
+fn signal_initial_sync_ready(initial_sync_ready_tx: &mut Option<tokio::sync::oneshot::Sender<()>>) {
+    let Some(initial_sync_ready_tx) = initial_sync_ready_tx.take() else {
+        return;
+    };
+
+    let _ = initial_sync_ready_tx.send(());
+}
+
 fn unix_now_secs() -> Option<u64> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     Some(now.as_secs())
@@ -203,19 +211,23 @@ fn normalize_database_url(url: &str) -> String {
 
 /// Start syncing the database for client config updates.
 /// Prefers LISTEN/NOTIFY with incremental updates and falls back to polling.
-pub async fn start_polling(database_url: String) {
+pub async fn start_polling(
+    database_url: String,
+    initial_sync_ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+) {
     let database_url = normalize_database_url(&database_url);
+    let mut initial_sync_ready_tx = initial_sync_ready_tx;
     info!("Starting database config sync");
 
     loop {
-        match run_realtime_loop(&database_url).await {
+        match run_realtime_loop(&database_url, &mut initial_sync_ready_tx).await {
             Ok(()) => break,
             Err(e) => {
                 warn!("LISTEN/NOTIFY sync failed: {e}. Falling back to polling mode for now");
             }
         }
 
-        match run_poll_loop(&database_url).await {
+        match run_poll_loop(&database_url, &mut initial_sync_ready_tx).await {
             Ok(()) => break,
             Err(e) => {
                 error!("Database polling fallback failed: {e}, retrying LISTEN/NOTIFY in 5s");
@@ -227,6 +239,7 @@ pub async fn start_polling(database_url: String) {
 
 async fn run_realtime_loop(
     database_url: &str,
+    initial_sync_ready_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Query connection: regular SELECT/DDL work.
     let root_store =
@@ -244,12 +257,6 @@ async fn run_realtime_loop(
     });
 
     install_database_objects(&query_client).await?;
-
-    let initial_clients = load_clients_snapshot(&query_client).await?;
-    mark_sync_success();
-    if let Ok(mut clients) = CLIENTS.write() {
-        *clients = initial_clients;
-    }
 
     // Listener connection: dedicated session for LISTEN/NOTIFY.
     let root_store =
@@ -309,7 +316,17 @@ async fn run_realtime_loop(
         }
     });
 
+    // Postgres LISTEN must be committed before the initial snapshot query.
+    // Otherwise an insert that lands between snapshot load and LISTEN registration
+    // is missed by both sources and tenant auth stays stale until full reconcile.
     listener_client.batch_execute(LISTEN_SQL).await?;
+
+    let initial_clients = load_clients_snapshot(&query_client).await?;
+    mark_sync_success();
+    if let Ok(mut clients) = CLIENTS.write() {
+        *clients = initial_clients;
+    }
+    signal_initial_sync_ready(initial_sync_ready_tx);
 
     info!(
         "Database connected, using LISTEN/NOTIFY on '{LISTEN_CHANNEL}' with {}s reconcile",
@@ -423,7 +440,10 @@ async fn run_realtime_loop(
     }
 }
 
-async fn run_poll_loop(database_url: &str) -> Result<(), tokio_postgres::Error> {
+async fn run_poll_loop(
+    database_url: &str,
+    initial_sync_ready_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<(), tokio_postgres::Error> {
     // PlanetScale requires TLS. Build a rustls connector with Mozilla root CAs
     // so sslmode=require (or higher) works.
     let root_store =
@@ -452,6 +472,7 @@ async fn run_poll_loop(database_url: &str) -> Result<(), tokio_postgres::Error> 
         if let Ok(mut clients) = CLIENTS.write() {
             *clients = new_clients;
         }
+        signal_initial_sync_ready(initial_sync_ready_tx);
 
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

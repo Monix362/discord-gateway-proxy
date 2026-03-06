@@ -15,7 +15,7 @@ use tokio::{
     task::JoinSet,
     time::timeout,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, reload, util::SubscriberInitExt,
 };
@@ -173,13 +173,6 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         sessions: RwLock::new(HashMap::new()),
     });
 
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = server::run(CONFIG.port, state_clone, metrics_handle).await {
-            error!("{}", e);
-        }
-    });
-
     // If DIRECT_DATABASE_URL (or DATABASE_URL fallback) is set,
     // sync dynamic client config from the database.
     // Prefers LISTEN/NOTIFY incremental updates with fallback polling,
@@ -187,8 +180,35 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let database_url =
         std::env::var("DIRECT_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"));
     if let Ok(database_url) = database_url {
-        tokio::spawn(db_config::start_polling(database_url));
+        let (initial_sync_ready_tx, initial_sync_ready_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(db_config::start_polling(
+            database_url,
+            Some(initial_sync_ready_tx),
+        ));
+
+        // Avoid serving tenant auth from an empty or config-seeded registry during
+        // startup when database-backed auth is configured.
+        match timeout(Duration::from_secs(10), initial_sync_ready_rx).await {
+            Ok(Ok(())) => {
+                info!("Initial database client sync completed before serving requests");
+            }
+            Ok(Err(_)) => {
+                warn!(
+                    "Database client sync readiness channel closed before initial sync completed",
+                );
+            }
+            Err(_) => {
+                warn!("Timed out waiting for initial database client sync; continuing startup",);
+            }
+        }
     }
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = server::run(CONFIG.port, state_clone, metrics_handle).await {
+            error!("{}", e);
+        }
+    });
 
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
