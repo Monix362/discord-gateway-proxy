@@ -117,8 +117,43 @@ where
         sink.send(Message::text(HELLO.to_string())).await?;
     }
 
-    if compress_rx.await == Ok(Some(true)) {
-        use_zlib = true;
+    // Process messages while waiting for the compression decision from
+    // IDENTIFY/RESUME. Before this fix, we blocked on compress_rx here, which
+    // prevented INVALID_SESSION and heartbeat ACKs from being delivered after a
+    // failed RESUME (the compress oneshot is only resolved on successful
+    // IDENTIFY/RESUME). This caused discord.js clients to enter an infinite
+    // zombie reconnect loop after proxy restart because:
+    //   1. HELLO was sent (before the block)
+    //   2. Client sent RESUME → proxy queued INVALID_SESSION + heartbeat ACKs
+    //   3. But they sat in the message_stream buffer, never reaching the client
+    //   4. Client detected zombie (no heartbeat ACK) → reconnect → same loop
+    let mut compress_rx = compress_rx;
+    let mut compress_pending = true;
+
+    while compress_pending {
+        tokio::select! {
+            result = &mut compress_rx => {
+                if result == Ok(Some(true)) {
+                    use_zlib = true;
+                }
+                compress_pending = false;
+            }
+            msg = message_stream.recv() => {
+                match msg {
+                    Some(msg) => {
+                        trace!("[{addr}] Sending {msg:?}");
+                        if use_zlib {
+                            let state = zlib.get_or_insert_with(ZlibState::new);
+                            let compressed = state.compress_and_send(&msg.into_payload());
+                            sink.send(Message::binary(compressed)).await?;
+                        } else {
+                            sink.send(msg).await?;
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+        }
     }
 
     while let Some(msg) = message_stream.recv().await {
