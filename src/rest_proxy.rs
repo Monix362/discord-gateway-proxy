@@ -294,8 +294,10 @@ pub async fn handle_rest_request(
         .map(auth::normalize_gateway_token)
         .unwrap_or("");
 
-    let auth_context = if auth_header.is_empty() && matches!(scope, RouteScope::AllowedWithoutAuth)
-    {
+    // Tokenized routes (interactions, webhooks) authenticate via URL token —
+    // skip proxy auth entirely. discord.js sends Authorization on ALL requests
+    // including these, so checking auth_header.is_empty() is wrong here.
+    let auth_context = if matches!(scope, RouteScope::AllowedWithoutAuth) {
         None
     } else {
         let Some(auth_context) = auth::authenticate_gateway_token(auth_header) else {
