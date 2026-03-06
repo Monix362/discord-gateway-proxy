@@ -26,6 +26,7 @@ enum RouteScope {
     Guild(u64),
     Channel(u64),
     AllowedWithoutGuild,
+    AllowedWithoutAuth,
     DeniedWithoutGuild,
 }
 
@@ -81,7 +82,7 @@ fn resolve_route_scope(path: &str) -> RouteScope {
     }
 
     if route[0] == "interactions" || route[0] == "webhooks" {
-        return RouteScope::AllowedWithoutGuild;
+        return RouteScope::AllowedWithoutAuth;
     }
 
     if route.len() >= 2 && route[0] == "guilds" {
@@ -108,6 +109,7 @@ fn is_client_authorized_for_route(authorized_guilds: &HashSet<u64>, scope: &Rout
         RouteScope::Guild(guild_id) => authorized_guilds.contains(guild_id),
         RouteScope::Channel(_) => false,
         RouteScope::AllowedWithoutGuild => true,
+        RouteScope::AllowedWithoutAuth => true,
         RouteScope::DeniedWithoutGuild => false,
     }
 }
@@ -263,6 +265,7 @@ pub async fn handle_rest_request(
         || normalized_path.clone(),
         |query| format!("{}?{}", normalized_path, query),
     );
+    let scope = resolve_route_scope(&normalized_path);
 
     let auth_header = request
         .headers()
@@ -271,53 +274,59 @@ pub async fn handle_rest_request(
         .map(auth::normalize_gateway_token)
         .unwrap_or("");
 
-    let Some(auth_context) = auth::authenticate_gateway_token(auth_header) else {
-        warn!(
-            "REST auth rejected: missing or invalid credentials: path={}",
-            normalized_path
-        );
-        return json_error(StatusCode::UNAUTHORIZED, "Invalid or missing credentials");
-    };
-
-    let scope = resolve_route_scope(&normalized_path);
-
-    if matches!(auth_context.principal, SessionPrincipal::Client(_)) {
-        let Some(authorized_guilds) = auth_context.authorized_guilds.as_deref() else {
+    let auth_context = if auth_header.is_empty() && matches!(scope, RouteScope::AllowedWithoutAuth)
+    {
+        None
+    } else {
+        let Some(auth_context) = auth::authenticate_gateway_token(auth_header) else {
             warn!(
-                "REST auth rejected: missing guild authorization: path={}",
+                "REST auth rejected: missing or invalid credentials: path={}",
                 normalized_path
             );
-            return json_error(StatusCode::FORBIDDEN, "Missing guild authorization");
+            return json_error(StatusCode::UNAUTHORIZED, "Invalid or missing credentials");
         };
+        Some(auth_context)
+    };
 
-        if matches!(scope, RouteScope::Channel(_)) {
-            let RouteScope::Channel(channel_id) = scope else {
-                return json_error(StatusCode::FORBIDDEN, "Channel route authorization failed");
+    if let Some(auth_context) = auth_context.as_ref() {
+        if matches!(auth_context.principal, SessionPrincipal::Client(_)) {
+            let Some(authorized_guilds) = auth_context.authorized_guilds.as_deref() else {
+                warn!(
+                    "REST auth rejected: missing guild authorization: path={}",
+                    normalized_path
+                );
+                return json_error(StatusCode::FORBIDDEN, "Missing guild authorization");
             };
 
-            let guild_id = resolve_channel_guild_id(channel_id, &state).await;
-            let is_authorized = guild_id
-                .map(|resolved_guild_id| authorized_guilds.contains(&resolved_guild_id))
-                .unwrap_or(false);
-            if !is_authorized {
+            if matches!(scope, RouteScope::Channel(_)) {
+                let RouteScope::Channel(channel_id) = scope else {
+                    return json_error(StatusCode::FORBIDDEN, "Channel route authorization failed");
+                };
+
+                let guild_id = resolve_channel_guild_id(channel_id, &state).await;
+                let is_authorized = guild_id
+                    .map(|resolved_guild_id| authorized_guilds.contains(&resolved_guild_id))
+                    .unwrap_or(false);
+                if !is_authorized {
+                    warn!(
+                        "REST auth rejected channel scope: channel_id={}, resolved_guild_id={:?}",
+                        channel_id, guild_id
+                    );
+                    return json_error(
+                        StatusCode::FORBIDDEN,
+                        "REST route is outside the authorized guild scope",
+                    );
+                }
+            } else if !is_client_authorized_for_route(authorized_guilds, &scope) {
                 warn!(
-                    "REST auth rejected channel scope: channel_id={}, resolved_guild_id={:?}",
-                    channel_id, guild_id
+                    "REST auth rejected route scope: path={}, scope={:?}",
+                    normalized_path, scope
                 );
                 return json_error(
                     StatusCode::FORBIDDEN,
                     "REST route is outside the authorized guild scope",
                 );
             }
-        } else if !is_client_authorized_for_route(authorized_guilds, &scope) {
-            warn!(
-                "REST auth rejected route scope: path={}, scope={:?}",
-                normalized_path, scope
-            );
-            return json_error(
-                StatusCode::FORBIDDEN,
-                "REST route is outside the authorized guild scope",
-            );
         }
     }
 
@@ -350,8 +359,10 @@ pub async fn handle_rest_request(
         upstream_request = upstream_request.header(name, value);
     }
 
-    upstream_request =
-        upstream_request.header(AUTHORIZATION.as_str(), format!("Bot {}", CONFIG.token));
+    if auth_context.is_some() {
+        upstream_request =
+            upstream_request.header(AUTHORIZATION.as_str(), format!("Bot {}", CONFIG.token));
+    }
 
     if !body_bytes.is_empty() {
         upstream_request = upstream_request.body(body_bytes.to_vec());

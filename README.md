@@ -306,6 +306,27 @@ The composite primary key `(client_id, guild_id)` ensures rows never collide acr
 
 Discord only has one bot installation per guild (the shared Kimaki bot), but the proxy multiplexes events to all clients authorized for that guild.
 
+## Same user on multiple machines (same guild)
+
+The same Discord user can onboard multiple machines to the same guild.
+
+Important distinction:
+
+- **Bot installation in Discord**: one shared Kimaki bot member per guild
+- **Kimaki machine authorization**: one `client_id:secret` per machine (OAuth state)
+
+That means machine A and machine B can both connect to the same guild without creating a second bot member.
+
+How it works when the bot is already installed:
+
+1. User runs onboarding on machine B, which generates a new `client_id` and `secret`
+2. User opens the OAuth URL and authorizes the app for the same guild
+3. Discord still redirects to the callback in authorization-code flow (returns `code`)
+4. Website exchanges the code, verifies `guild_id`, and upserts `(client_id, guild_id)`
+5. Machine B polls onboarding status and starts using `client_id:secret`
+
+So there is still only one shared bot in the guild, but there can be many authorized client identities (one per machine) in `gateway_clients`.
+
 ## Known Issues / TODOs
 
 - Re-add voice support
