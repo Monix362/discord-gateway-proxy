@@ -16,12 +16,20 @@ import {
     getDopplerEnv,
     shell,
 } from '@xmorse/deployment-utils'
+import { GatewayIntentBits } from 'discord.js'
 
 const appName = 'kimaki-gateway-production'
 
+// Must match the intents used by the CLI in discord-bot.ts createDiscordClient()
+const intents =
+    GatewayIntentBits.Guilds |
+    GatewayIntentBits.GuildMessages |
+    GatewayIntentBits.MessageContent |
+    GatewayIntentBits.GuildVoiceStates
+
 const gatewayConfig = {
     log_level: 'info',
-    intents: 32511,
+    intents,
     externally_accessible_url: 'wss://discord-gateway.kimaki.xyz',
     cache: {
         // Channels, roles, and current_member are needed so the synthetic

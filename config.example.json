@@ -1,7 +1,7 @@
 {
     "log_level": "info",
     "token": "",
-    "intents": 32511,
+    "intents": 33409,
     "cache": {
         "channels": false,
         "presences": false,

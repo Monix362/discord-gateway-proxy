@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { GatewayIntentBits } from 'discord.js'
 import process from 'node:process'
 
 const defaultPort = 7878
@@ -35,9 +36,16 @@ async function run() {
     const externallyAccessibleUrl =
         process.env.GATEWAY_EXTERNAL_URL || `ws://localhost:${port}`
 
+    // Must match the intents used by the CLI in discord-bot.ts createDiscordClient()
+    const intents =
+        GatewayIntentBits.Guilds |
+        GatewayIntentBits.GuildMessages |
+        GatewayIntentBits.MessageContent |
+        GatewayIntentBits.GuildVoiceStates
+
     const config = {
         log_level: process.env.GATEWAY_LOG_LEVEL || 'info',
-        intents: 32511,
+        intents,
         port,
         externally_accessible_url: externallyAccessibleUrl,
         cache: {
