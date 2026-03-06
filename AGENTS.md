@@ -36,6 +36,68 @@ Onboarding flows are handled by the `website` package.
 When changing one side of this split, document and validate compatibility with
 the other side.
 
+# Discord OpenAPI source of truth
+
+Use Discord's official OpenAPI schema to validate REST route handling decisions:
+
+- https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json
+
+When editing `src/rest_proxy.rs`, check this schema first to confirm which
+routes are bot-token routes vs tokenized unauth routes. Keep gateway-proxy
+allowlists strict and fail-closed.
+
+For this project, especially validate:
+
+- `/interactions/{interaction_id}/{interaction_token}/...`
+- `/webhooks/{webhook_id}/{webhook_token}/...`
+- `/webhooks/{webhook_id}` (bot-token route; must not be allowlisted as unauth)
+
+Useful `jq` commands for the large OpenAPI file:
+
+```bash
+# 1) list route-index, method-index, method, path (one row per operation)
+jq -r '
+  .paths
+  | to_entries
+  | to_entries[]
+  | .key as $routeIndex
+  | .value.key as $path
+  | .value.value
+  | to_entries
+  | to_entries[]
+  | .key as $methodIndex
+  | .value.key as $method
+  | select($method | test("^(get|post|put|patch|delete|head|options)$"))
+  | "\($routeIndex)\t\($methodIndex)\t\($method|ascii_upcase)\t\($path)"
+' ./tmp/discord-openapi.json
+
+# 2) same listing, filtered by a path fragment (example: webhooks)
+jq -r --arg q "/webhooks" '
+  .paths
+  | to_entries
+  | to_entries[]
+  | .key as $routeIndex
+  | .value.key as $path
+  | select($path | contains($q))
+  | .value.value
+  | to_entries
+  | to_entries[]
+  | .key as $methodIndex
+  | .value.key as $method
+  | select($method | test("^(get|post|put|patch|delete|head|options)$"))
+  | "\($routeIndex)\t\($methodIndex)\t\($method|ascii_upcase)\t\($path)"
+' ./tmp/discord-openapi.json
+
+# 3) inspect one full route object by route index from command (1)
+jq '.paths | to_entries[133]' ./tmp/discord-openapi.json
+
+# 4) inspect one method object by route index + method index from command (1)
+jq '.paths | to_entries[133].value | to_entries[2]' ./tmp/discord-openapi.json
+```
+
+Use these indices as stable anchors while reviewing route behavior in
+`src/rest_proxy.rs`.
+
 # deploying
 
 ALWAYS use the deploy script to deploy gateway-proxy. NEVER use `fly deploy` directly.
