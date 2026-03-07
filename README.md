@@ -269,7 +269,7 @@ User's terminal                          Browser       Website (CF Worker)  Post
        │                                    │                   │               │             │
 11.    │ connect to gateway proxy           │                   │               │             │
        ├────────────────────────── IDENTIFY clientId:clientSecret ───────────────────────────▶│
-       │                                    │                   │               ├ LISTEN/NOTIFY▶│
+       │                                    │                   │               LISTEN/NOTIFY▶│
        │                                    │                   │               │             │
 12.    │◀──────────────────────────── READY (filtered to guild) ──────────────────────────────┤
        │                                    │                   │               │             │
