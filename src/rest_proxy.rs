@@ -478,6 +478,9 @@ mod tests {
             &RouteScope::AllowedWithoutAuth,
             false,
         ));
-        assert!(should_attach_bot_authorization(&RouteScope::AllowedWithoutGuild, true));
+        assert!(should_attach_bot_authorization(
+            &RouteScope::AllowedWithoutGuild,
+            true
+        ));
     }
 }
