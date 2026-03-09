@@ -142,10 +142,7 @@ fn should_skip_request_header(name: &str) -> bool {
 }
 
 fn should_skip_response_header(name: &str) -> bool {
-    matches!(
-        name,
-        "transfer-encoding" | "content-encoding" | "content-length"
-    )
+    matches!(name, "transfer-encoding" | "content-length")
 }
 
 fn discord_rest_base_url() -> String {
@@ -442,7 +439,10 @@ pub async fn handle_rest_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_route_scope, should_attach_bot_authorization, RouteScope};
+    use super::{
+        resolve_route_scope, should_attach_bot_authorization, should_skip_response_header,
+        RouteScope,
+    };
 
     #[test]
     fn resolves_tokenized_routes_as_allowed_without_auth() {
@@ -482,5 +482,12 @@ mod tests {
             &RouteScope::AllowedWithoutGuild,
             true
         ));
+    }
+
+    #[test]
+    fn keeps_content_encoding_response_header() {
+        assert!(!should_skip_response_header("content-encoding"));
+        assert!(should_skip_response_header("content-length"));
+        assert!(should_skip_response_header("transfer-encoding"));
     }
 }
