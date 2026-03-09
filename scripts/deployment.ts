@@ -8,8 +8,8 @@
  * (project: 'website', stage: 'production').
  *
  * Usage:
- *   pnpm run deploy
- *   SKIP_BUILD=1 pnpm run deploy   # skip cross-compilation, use existing binary
+ *   pnpm run deployment
+ *   SKIP_BUILD=1 pnpm run deployment   # skip cross-compilation, use existing binary
  */
 import {
     deployFly,

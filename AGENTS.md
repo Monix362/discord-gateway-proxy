@@ -100,10 +100,10 @@ Use these indices as stable anchors while reviewing route behavior in
 
 # deploying
 
-ALWAYS use the deploy script to deploy gateway-proxy. NEVER use `fly deploy` directly.
+ALWAYS use the deployment script to deploy gateway-proxy. NEVER use `fly deploy` directly.
 
 ```bash
-cd gateway-proxy && pnpm run deploy
+cd gateway-proxy && pnpm run deployment
 ```
 
 This cross-compiles the Rust binary locally on macOS (via `build:linux` using `x86_64-linux-musl-gcc`), then deploys a minimal scratch image with `Dockerfile.fly`. The `Dockerfile` (non-fly) is only for reference and is NOT used for deployment.
@@ -111,10 +111,10 @@ This cross-compiles the Rust binary locally on macOS (via `build:linux` using `x
 To skip the build step (e.g. re-deploy with same binary):
 
 ```bash
-SKIP_BUILD=1 pnpm run deploy
+SKIP_BUILD=1 pnpm run deployment
 ```
 
-The deploy script reads secrets from Doppler (project: `website`, stage: `production`) and sets them as Fly secrets automatically.
+The deployment script reads secrets from Doppler (project: `website`, stage: `production`) and sets them as Fly secrets automatically.
 
 # database TLS
 
