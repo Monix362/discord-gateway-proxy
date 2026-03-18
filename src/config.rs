@@ -33,6 +33,11 @@ pub struct ClientConfig {
     /// Guild IDs can be strings or numbers in the JSON config.
     #[serde(default, deserialize_with = "deserialize_guild_ids")]
     pub guilds: HashSet<u64>,
+    /// When set, the gateway-proxy connects outbound to this URL's /gateway WS
+    /// endpoint instead of waiting for the client to connect inbound.
+    /// Used for cloud-deployed kimaki instances that are internet-reachable.
+    #[serde(default)]
+    pub reachable_url: Option<String>,
 }
 
 /// Custom deserializer to handle guild IDs as either strings or numbers

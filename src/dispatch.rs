@@ -15,10 +15,12 @@ use std::{
 };
 
 use crate::{
+    db_config::CLIENTS,
     config::CONFIG,
     deserializer::{EventTypeInfo, GatewayEvent, SequenceInfo},
     model::Ready,
-    state::Shard as ShardState,
+    state::{BufferedClientEvent, Shard as ShardState, State},
+    wake,
     SHUTDOWN,
 };
 
@@ -27,12 +29,82 @@ use crate::{
 pub type BroadcastMessage = (String, Option<SequenceInfo>, Option<u64>);
 
 const TEN_SECONDS: Duration = Duration::from_secs(10);
+const WAKE_COOLDOWN: Duration = Duration::from_secs(10);
+
+fn should_buffer_event(event_name: &str) -> bool {
+    matches!(
+        event_name,
+        "MESSAGE_CREATE"
+            | "MESSAGE_UPDATE"
+            | "MESSAGE_DELETE"
+            | "THREAD_CREATE"
+            | "THREAD_UPDATE"
+            | "THREAD_DELETE"
+    )
+}
+
+fn buffer_event_for_disconnected_clients(
+    state: &State,
+    payload: &str,
+    sequence: Option<SequenceInfo>,
+    guild_id: Option<u64>,
+) {
+    let Some(guild_id) = guild_id else {
+        return;
+    };
+
+    let wake_targets: Vec<(String, String, String)> = CLIENTS
+        .read()
+        .map(|clients| {
+            clients
+                .iter()
+                .filter_map(|(client_id, config)| {
+                    if !config.guilds.contains(&guild_id) {
+                        return None;
+                    }
+                    if state.is_client_connected(client_id) {
+                        return None;
+                    }
+
+                    state.push_offline_event_for_client(
+                        client_id,
+                        BufferedClientEvent {
+                            payload: payload.to_string(),
+                            sequence: sequence.clone(),
+                            guild_id: Some(guild_id),
+                        },
+                    );
+
+                    let should_wake = state.should_wake_client(client_id, WAKE_COOLDOWN);
+                    if !should_wake {
+                        return None;
+                    }
+
+                    config.reachable_url.as_ref().map(|url| {
+                        (
+                            client_id.clone(),
+                            url.clone(),
+                            format!("{client_id}:{}", config.secret),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (client_id, url, token) in wake_targets {
+        tokio::spawn(async move {
+            wake::wake_client(&client_id, &url, &token).await;
+        });
+    }
+}
 
 pub async fn events(
     mut shard: Shard,
     shard_state: Arc<ShardState>,
     shard_id: u32,
     broadcast_tx: broadcast::Sender<BroadcastMessage>,
+    state: State,
 ) {
     // This method only wants to relay events while the shard is in a READY state
     // Therefore, we only put events in the queue while we are connected and READY
@@ -121,7 +193,11 @@ pub async fn events(
                 let payload_copy = payload.clone();
                 trace!("[Shard {shard_id}] Sending payload to clients: {payload_copy:?}",);
 
-                let _res = broadcast_tx.send((payload_copy, sequence, guild_id));
+                let _res = broadcast_tx.send((payload_copy.clone(), sequence.clone(), guild_id));
+
+                if should_buffer_event(event_name) {
+                    buffer_event_for_disconnected_clients(&state, &payload_copy, sequence, guild_id);
+                }
             }
         }
 

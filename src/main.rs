@@ -49,6 +49,7 @@ mod rest_proxy;
 mod server;
 mod state;
 mod upgrade;
+mod wake;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -115,6 +116,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = config_builder.build();
 
     let mut dispatch_tasks = JoinSet::new();
+    let mut pending_dispatches = Vec::new();
 
     for shard_id in shard_start..shard_end {
         let mut builder = ConfigBuilder::from(config.clone());
@@ -152,15 +154,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             guilds: guild_cache,
         });
 
-        // Now pipe the events into the broadcast
-        // and handle state updates for the guild cache
-        // and set the ready event if received
-        dispatch_tasks.spawn(dispatch::events(
-            shard,
-            shard_status.clone(),
-            shard_id,
-            broadcast_tx,
-        ));
+        pending_dispatches.push((shard, shard_status.clone(), shard_id, broadcast_tx));
 
         shards.push(shard_status);
 
@@ -171,7 +165,21 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         shards,
         shard_count,
         sessions: RwLock::new(HashMap::new()),
+        active_client_connections: RwLock::new(HashMap::new()),
+        offline_event_buffers: RwLock::new(HashMap::new()),
+        last_wake_attempts: RwLock::new(HashMap::new()),
     });
+
+    // Now pipe shard events into broadcasts and state updates.
+    for (shard, shard_status, shard_id, broadcast_tx) in pending_dispatches {
+        dispatch_tasks.spawn(dispatch::events(
+            shard,
+            shard_status,
+            shard_id,
+            broadcast_tx,
+            state.clone(),
+        ));
+    }
 
     // If DIRECT_DATABASE_URL (or DATABASE_URL fallback) is set,
     // sync dynamic client config from the database.

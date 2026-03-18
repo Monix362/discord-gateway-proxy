@@ -3,7 +3,7 @@ use tokio::sync::{broadcast, Notify};
 use twilight_gateway::MessageSender;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -11,6 +11,14 @@ use std::{
 use crate::{cache, dispatch::BroadcastMessage, model::JsonObject};
 
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const OFFLINE_EVENT_BUFFER_LIMIT: usize = 200;
+
+#[derive(Clone)]
+pub struct BufferedClientEvent {
+    pub payload: String,
+    pub sequence: Option<crate::deserializer::SequenceInfo>,
+    pub guild_id: Option<u64>,
+}
 
 /// Manager for the READY state of a shard.
 pub struct Ready {
@@ -100,6 +108,12 @@ pub struct Inner {
     pub shard_count: u32,
     /// All sessions active in the proxy.
     pub sessions: RwLock<HashMap<String, Session>>,
+    /// Active live gateway connections per multi-tenant client.
+    pub active_client_connections: RwLock<HashMap<String, usize>>,
+    /// Last buffered dispatch events for disconnected clients.
+    pub offline_event_buffers: RwLock<HashMap<String, VecDeque<BufferedClientEvent>>>,
+    /// Last wake attempt timestamp per client to avoid wake storms.
+    pub last_wake_attempts: RwLock<HashMap<String, Instant>>,
 }
 
 impl Inner {
@@ -146,6 +160,59 @@ impl Inner {
         self.shards
             .iter()
             .find_map(|shard| shard.guilds.resolve_guild_id_for_channel(channel_id))
+    }
+
+    pub fn mark_client_connected(&self, client_id: &str) {
+        let mut active = self.active_client_connections.write().unwrap();
+        let current = active.get(client_id).copied().unwrap_or(0);
+        active.insert(client_id.to_string(), current + 1);
+    }
+
+    pub fn mark_client_disconnected(&self, client_id: &str) {
+        let mut active = self.active_client_connections.write().unwrap();
+        let current = active.get(client_id).copied().unwrap_or(0);
+        if current <= 1 {
+            active.remove(client_id);
+            return;
+        }
+        active.insert(client_id.to_string(), current - 1);
+    }
+
+    pub fn is_client_connected(&self, client_id: &str) -> bool {
+        let active = self.active_client_connections.read().unwrap();
+        active.get(client_id).copied().unwrap_or(0) > 0
+    }
+
+    pub fn push_offline_event_for_client(&self, client_id: &str, event: BufferedClientEvent) {
+        let mut buffers = self.offline_event_buffers.write().unwrap();
+        let entry = buffers
+            .entry(client_id.to_string())
+            .or_insert_with(VecDeque::new);
+        if entry.len() >= OFFLINE_EVENT_BUFFER_LIMIT {
+            let _ = entry.pop_front();
+        }
+        entry.push_back(event);
+    }
+
+    pub fn drain_offline_events_for_client(&self, client_id: &str) -> Vec<BufferedClientEvent> {
+        let mut buffers = self.offline_event_buffers.write().unwrap();
+        buffers
+            .remove(client_id)
+            .map(|deque| deque.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn should_wake_client(&self, client_id: &str, cooldown: Duration) -> bool {
+        let now = Instant::now();
+        let mut wakes = self.last_wake_attempts.write().unwrap();
+        let previous = wakes.get(client_id).copied();
+        if let Some(last) = previous {
+            if now.duration_since(last) < cooldown {
+                return false;
+            }
+        }
+        wakes.insert(client_id.to_string(), now);
+        true
     }
 }
 

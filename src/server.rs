@@ -183,6 +183,8 @@ async fn forward_shard(
     send_guilds: bool,
     mut seq: usize,
     authorized_guilds: Option<Arc<HashSet<u64>>>,
+    state: State,
+    client_id: Option<String>,
 ) {
     let shard_id = shard_status.id;
 
@@ -222,8 +224,34 @@ async fn forward_shard(
         let _res = stream_writer.send(Message::text(RESUMED.to_string()));
     }
 
-    // For formatting the sequence number as a string, reuse a buffer
+    // For formatting the sequence number as a string, reuse a buffer.
     let mut buffer = Buffer::new();
+
+    // Replay buffered offline events before subscribing to live stream.
+    if let Some(client_id) = client_id {
+        let buffered = state.drain_offline_events_for_client(&client_id);
+        for mut event in buffered {
+            if let Some(ref guilds) = authorized_guilds {
+                match event.guild_id {
+                    Some(gid) => {
+                        if !guilds.contains(&gid) {
+                            continue;
+                        }
+                    }
+                    None => {
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(SequenceInfo(_, sequence_range)) = event.sequence {
+                seq += 1;
+                event.payload.replace_range(sequence_range, buffer.format(seq));
+            }
+
+            let _res = stream_writer.send(Message::text(event.payload));
+        }
+    }
 
     // Subscribe to events for this shard
     let mut event_receiver = shard_status.events.subscribe();
@@ -295,6 +323,7 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
     ));
 
     let mut shard_forward_task = None;
+    let mut active_client_id: Option<String> = None;
 
     while let Some(Ok(msg)) = stream.next().await {
         if !msg.is_text() && !msg.is_binary() {
@@ -353,6 +382,17 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                     debug!("[{addr}] Client authenticated as multi-tenant client");
                 }
 
+                let identified_client_id = match &auth.principal {
+                    SessionPrincipal::Client(client_id) => Some(client_id.clone()),
+                    _ => None,
+                };
+                if let Some(client_id) = &identified_client_id {
+                    if active_client_id.is_none() {
+                        state.mark_client_connected(client_id);
+                        active_client_id = Some(client_id.clone());
+                    }
+                }
+
                 trace!("[{addr}] Shard ID is {shard_id}");
 
                 // Create a new session for this client
@@ -377,6 +417,8 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                         true,
                         0,
                         auth.authorized_guilds,
+                        state.clone(),
+                        identified_client_id,
                     )));
 
                     let _res = sender.send(identify.d.compress);
@@ -425,6 +467,16 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                         } else {
                             session.authorized_guilds.clone()
                         };
+                    let resumed_client_id = match &session.principal {
+                        SessionPrincipal::Client(client_id) => Some(client_id.clone()),
+                        _ => None,
+                    };
+                    if let Some(client_id) = &resumed_client_id {
+                        if active_client_id.is_none() {
+                            state.mark_client_connected(client_id);
+                            active_client_id = Some(client_id.clone());
+                        }
+                    }
 
                     if let Some(sender) = compress_tx.take() {
                         shard_forward_task = Some(tokio::spawn(forward_shard(
@@ -434,6 +486,8 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                             false,
                             resume.d.seq,
                             authorized_guilds,
+                            state.clone(),
+                            resumed_client_id,
                         )));
 
                         let _res = sender.send(session.compress);
@@ -461,6 +515,10 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
 
     if let Some(shard_forward_task) = shard_forward_task {
         shard_forward_task.abort();
+    }
+
+    if let Some(client_id) = active_client_id {
+        state.mark_client_disconnected(&client_id);
     }
 
     Ok(())

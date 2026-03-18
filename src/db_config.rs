@@ -96,19 +96,10 @@ pub fn authenticate_client_with_id(token: &str) -> Option<(String, HashSet<u64>)
     }
 }
 
-const CREATE_TABLE_SQL: &str = "\
-CREATE TABLE IF NOT EXISTS gateway_clients (
-    client_id  TEXT NOT NULL,
-    secret     TEXT NOT NULL,
-    guild_id   TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (client_id, guild_id)
-)";
 
-const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id FROM gateway_clients";
+const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients";
 const SELECT_CLIENTS_BY_IDS_SQL: &str =
-    "SELECT client_id, secret, guild_id FROM gateway_clients WHERE client_id = ANY($1::text[])";
+    "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients WHERE client_id = ANY($1::text[])";
 const CREATE_NOTIFY_FUNCTION_SQL: &str = "\
 CREATE OR REPLACE FUNCTION notify_gateway_clients_change()
 RETURNS trigger
@@ -462,7 +453,6 @@ async fn run_poll_loop(
         }
     });
 
-    client.execute(CREATE_TABLE_SQL, &[]).await?;
     info!("Database connected, polling for client config every 1s");
 
     loop {
@@ -481,7 +471,6 @@ async fn run_poll_loop(
 async fn install_database_objects(
     client: &tokio_postgres::Client,
 ) -> Result<(), tokio_postgres::Error> {
-    client.execute(CREATE_TABLE_SQL, &[]).await?;
     client.batch_execute(CREATE_NOTIFY_FUNCTION_SQL).await?;
     client.batch_execute(CREATE_NOTIFY_TRIGGER_SQL).await?;
 
@@ -529,6 +518,7 @@ fn group_rows_into_clients(rows: Vec<tokio_postgres::Row>) -> HashMap<String, Cl
         let client_id: String = row.get(0);
         let secret: String = row.get(1);
         let guild_id_str: String = row.get(2);
+        let reachable_url: Option<String> = row.get(3);
 
         let guild_id: u64 = match guild_id_str.parse() {
             Ok(id) => id,
@@ -545,11 +535,19 @@ fn group_rows_into_clients(rows: Vec<tokio_postgres::Row>) -> HashMap<String, Cl
                     warn!("Conflicting secrets for client '{client_id}', using first seen");
                 }
                 c.guilds.insert(guild_id);
+                // Use reachable_url from any row (should be the same across all rows for a client)
+                if c.reachable_url.is_none() && reachable_url.is_some() {
+                    c.reachable_url = reachable_url.clone();
+                }
             })
             .or_insert_with(|| {
                 let mut guilds = HashSet::new();
                 guilds.insert(guild_id);
-                ClientConfig { secret, guilds }
+                ClientConfig {
+                    secret,
+                    guilds,
+                    reachable_url,
+                }
             });
     }
 
