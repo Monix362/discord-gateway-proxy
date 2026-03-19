@@ -1,5 +1,5 @@
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, watch};
 use twilight_gateway::MessageSender;
 
 use std::{
@@ -21,43 +21,51 @@ pub struct BufferedClientEvent {
 }
 
 /// Manager for the READY state of a shard.
+/// Uses tokio::sync::watch to avoid the missed-notify race that exists
+/// with Notify + RwLock (notification can fire between is_ready() check
+/// and notified().await registration, causing false timeouts).
 pub struct Ready {
-    inner: RwLock<Option<JsonObject>>,
-    changed: Notify,
+    tx: watch::Sender<Option<JsonObject>>,
+    rx: watch::Receiver<Option<JsonObject>>,
 }
 
 impl Ready {
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(None),
-            changed: Notify::new(),
-        }
-    }
-
-    pub async fn wait_changed(&self) {
-        self.changed.notified().await;
+        let (tx, rx) = watch::channel(None);
+        Self { tx, rx }
     }
 
     pub fn is_ready(&self) -> bool {
-        self.inner.read().unwrap().is_some()
+        self.rx.borrow().is_some()
     }
 
     pub fn set_ready(&self, payload: JsonObject) {
-        *self.inner.write().unwrap() = Some(payload);
-        self.changed.notify_waiters();
+        let _ = self.tx.send(Some(payload));
     }
 
     pub fn set_not_ready(&self) {
-        *self.inner.write().unwrap() = None;
-        self.changed.notify_waiters();
+        let _ = self.tx.send(None);
     }
 
+    /// Wait until the shard has received a READY payload.
+    /// Uses watch::changed() which is race-free: if the value changed
+    /// between our last read and the await, changed() returns immediately.
     pub async fn wait_until_ready(&self) -> JsonObject {
-        while !self.is_ready() {
-            self.wait_changed().await;
+        let mut rx = self.rx.clone();
+        loop {
+            {
+                let val = rx.borrow_and_update();
+                if let Some(ref payload) = *val {
+                    return payload.clone();
+                }
+            }
+            // wait for next change — cannot miss notifications because
+            // borrow_and_update() marks the current value as seen
+            if rx.changed().await.is_err() {
+                // sender dropped — should never happen, but avoid infinite loop
+                panic!("Ready watch sender dropped before shard became ready");
+            }
         }
-
-        self.inner.read().unwrap().clone().unwrap()
     }
 }
 
