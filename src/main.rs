@@ -181,6 +181,25 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         ));
     }
 
+    // Wait for all shards to receive READY from Discord before accepting
+    // client connections. Without this gate, clients that connect during
+    // shard startup block on forward_shard()'s wait_until_ready() and
+    // discord.js times out → spurious "Shard 0 reconnecting: attempt #1".
+    // Shards are awaited in parallel so total wait is ~30s max, not 30s * N.
+    let shard_ready_deadline = Duration::from_secs(30);
+    let waits = state.shards.iter().map(|shard| async move {
+        let shard_id = shard.id;
+        match timeout(shard_ready_deadline, shard.ready.wait_until_ready()).await {
+            Ok(_) => {
+                info!("Shard {shard_id} READY before serving client connections");
+            }
+            Err(_) => {
+                warn!("Timed out waiting for shard {shard_id} READY after 30s; continuing startup");
+            }
+        }
+    });
+    futures_util::future::join_all(waits).await;
+
     // If DIRECT_DATABASE_URL (or DATABASE_URL fallback) is set,
     // sync dynamic client config from the database.
     // Prefers LISTEN/NOTIFY incremental updates with fallback polling,
