@@ -242,10 +242,13 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            let valid_ids: std::collections::HashSet<String> = db_config::CLIENTS
-                .read()
-                .map(|clients| clients.keys().cloned().collect())
-                .unwrap_or_default();
+            let valid_ids: std::collections::HashSet<String> = match db_config::CLIENTS.read() {
+                Ok(clients) => clients.keys().cloned().collect(),
+                Err(e) => {
+                    warn!("Skipping stale-client cleanup: CLIENTS lock poisoned: {e}");
+                    continue;
+                }
+            };
             state_for_cleanup.prune_stale_client_state(&valid_ids);
         }
     });
