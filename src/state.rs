@@ -50,24 +50,27 @@ impl Ready {
     /// Wait until the shard has received a READY payload.
     /// Uses watch::changed() which is race-free: if the value changed
     /// between our last read and the await, changed() returns immediately.
-    pub async fn wait_until_ready(&self) -> JsonObject {
+    /// Returns Err if the sender is dropped before the shard becomes ready.
+    pub async fn wait_until_ready(&self) -> Result<JsonObject, ReadySenderDropped> {
         let mut rx = self.rx.clone();
         loop {
             {
                 let val = rx.borrow_and_update();
                 if let Some(ref payload) = *val {
-                    return payload.clone();
+                    return Ok(payload.clone());
                 }
             }
             // wait for next change — cannot miss notifications because
             // borrow_and_update() marks the current value as seen
             if rx.changed().await.is_err() {
-                // sender dropped — should never happen, but avoid infinite loop
-                panic!("Ready watch sender dropped before shard became ready");
+                return Err(ReadySenderDropped);
             }
         }
     }
 }
+
+#[derive(Debug)]
+pub struct ReadySenderDropped;
 
 /// State of a single shard.
 pub struct Shard {
@@ -221,6 +224,20 @@ impl Inner {
         }
         wakes.insert(client_id.to_string(), now);
         true
+    }
+
+    /// Remove offline event buffers and wake timestamps for client IDs that
+    /// are no longer present in the CLIENTS registry. Without this, entries
+    /// for deleted/uninstalled clients accumulate in memory forever.
+    pub fn prune_stale_client_state(&self, valid_client_ids: &HashSet<String>) {
+        {
+            let mut buffers = self.offline_event_buffers.write().unwrap();
+            buffers.retain(|client_id, _| valid_client_ids.contains(client_id));
+        }
+        {
+            let mut wakes = self.last_wake_attempts.write().unwrap();
+            wakes.retain(|client_id, _| valid_client_ids.contains(client_id));
+        }
     }
 }
 

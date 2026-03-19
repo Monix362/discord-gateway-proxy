@@ -191,7 +191,13 @@ async fn forward_shard(
     debug!("[Shard {shard_id}] Starting to send events to client",);
 
     // Wait until we have a valid READY payload for this shard
-    let ready_payload = shard_status.ready.wait_until_ready().await;
+    let ready_payload = match shard_status.ready.wait_until_ready().await {
+        Ok(payload) => payload,
+        Err(_) => {
+            error!("[Shard {shard_id}] Ready sender dropped; closing client connection");
+            return;
+        }
+    };
 
     if send_guilds {
         // Get a fake ready payload to send to the client

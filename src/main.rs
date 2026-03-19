@@ -190,8 +190,11 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let waits = state.shards.iter().map(|shard| async move {
         let shard_id = shard.id;
         match timeout(shard_ready_deadline, shard.ready.wait_until_ready()).await {
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 info!("Shard {shard_id} READY before serving client connections");
+            }
+            Ok(Err(_)) => {
+                warn!("Shard {shard_id} Ready sender dropped before READY; continuing startup");
             }
             Err(_) => {
                 warn!("Timed out waiting for shard {shard_id} READY after 30s; continuing startup");
@@ -229,6 +232,23 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         }
     }
+
+    // Periodic cleanup: prune offline_event_buffers and last_wake_attempts
+    // for client IDs no longer present in the CLIENTS registry.
+    // Runs every 5 minutes to avoid unbounded memory growth from deleted clients.
+    let state_for_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5 * 60));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let valid_ids: std::collections::HashSet<String> = db_config::CLIENTS
+                .read()
+                .map(|clients| clients.keys().cloned().collect())
+                .unwrap_or_default();
+            state_for_cleanup.prune_stale_client_state(&valid_ids);
+        }
+    });
 
     let state_clone = state.clone();
     tokio::spawn(async move {
