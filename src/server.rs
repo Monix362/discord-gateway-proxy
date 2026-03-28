@@ -252,7 +252,9 @@ async fn forward_shard(
 
             if let Some(SequenceInfo(_, sequence_range)) = event.sequence {
                 seq += 1;
-                event.payload.replace_range(sequence_range, buffer.format(seq));
+                event
+                    .payload
+                    .replace_range(sequence_range, buffer.format(seq));
             }
 
             let _res = stream_writer.send(Message::text(event.payload));

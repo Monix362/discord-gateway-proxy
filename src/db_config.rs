@@ -96,10 +96,9 @@ pub fn authenticate_client_with_id(token: &str) -> Option<(String, HashSet<u64>)
     }
 }
 
-
-const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients";
+const SELECT_CLIENTS_SQL: &str = "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients ORDER BY client_id ASC, updated_at DESC NULLS LAST, created_at DESC";
 const SELECT_CLIENTS_BY_IDS_SQL: &str =
-    "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients WHERE client_id = ANY($1::text[])";
+    "SELECT client_id, secret, guild_id, reachable_url FROM gateway_clients WHERE client_id = ANY($1::text[]) ORDER BY client_id ASC, updated_at DESC NULLS LAST, created_at DESC";
 const CREATE_NOTIFY_FUNCTION_SQL: &str = "\
 CREATE OR REPLACE FUNCTION notify_gateway_clients_change()
 RETURNS trigger
@@ -489,7 +488,8 @@ async fn refresh_clients_by_ids(
     let rows = client
         .query(SELECT_CLIENTS_BY_IDS_SQL, &[&client_ids])
         .await?;
-    let refreshed_clients = group_rows_into_clients(rows);
+    let refreshed_clients =
+        group_rows_into_clients(rows.into_iter().map(snapshot_client_row_from_row).collect());
 
     if let Ok(mut clients) = CLIENTS.write() {
         for client_id in dirty_client_ids {
@@ -508,17 +508,36 @@ async fn load_clients_snapshot(
 ) -> Result<HashMap<String, ClientConfig>, tokio_postgres::Error> {
     let rows = client.query(SELECT_CLIENTS_SQL, &[]).await?;
 
-    Ok(group_rows_into_clients(rows))
+    Ok(group_rows_into_clients(
+        rows.into_iter().map(snapshot_client_row_from_row).collect(),
+    ))
 }
 
-fn group_rows_into_clients(rows: Vec<tokio_postgres::Row>) -> HashMap<String, ClientConfig> {
+#[derive(Clone)]
+struct SnapshotClientRow {
+    client_id: String,
+    secret: String,
+    guild_id: String,
+    reachable_url: Option<String>,
+}
+
+fn snapshot_client_row_from_row(row: tokio_postgres::Row) -> SnapshotClientRow {
+    SnapshotClientRow {
+        client_id: row.get(0),
+        secret: row.get(1),
+        guild_id: row.get(2),
+        reachable_url: row.get(3),
+    }
+}
+
+fn group_rows_into_clients(rows: Vec<SnapshotClientRow>) -> HashMap<String, ClientConfig> {
     let mut clients: HashMap<String, ClientConfig> = HashMap::new();
 
     for row in rows {
-        let client_id: String = row.get(0);
-        let secret: String = row.get(1);
-        let guild_id_str: String = row.get(2);
-        let reachable_url: Option<String> = row.get(3);
+        let client_id = row.client_id;
+        let secret = row.secret;
+        let guild_id_str = row.guild_id;
+        let reachable_url = row.reachable_url;
 
         let guild_id: u64 = match guild_id_str.parse() {
             Ok(id) => id,
@@ -532,7 +551,10 @@ fn group_rows_into_clients(rows: Vec<tokio_postgres::Row>) -> HashMap<String, Cl
             .entry(client_id.clone())
             .and_modify(|c| {
                 if c.secret != secret {
-                    warn!("Conflicting secrets for client '{client_id}', using first seen");
+                    warn!(
+                        "Conflicting secrets for client '{client_id}', keeping newest secret and skipping stale guild row"
+                    );
+                    return;
                 }
                 c.guilds.insert(guild_id);
                 // Use reachable_url from any row (should be the same across all rows for a client)
@@ -552,4 +574,44 @@ fn group_rows_into_clients(rows: Vec<tokio_postgres::Row>) -> HashMap<String, Cl
     }
 
     clients
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{group_rows_into_clients, SnapshotClientRow};
+
+    #[test]
+    fn conflicting_secrets_keep_newest_row_and_skip_stale_guilds() {
+        let clients = group_rows_into_clients(vec![
+            SnapshotClientRow {
+                client_id: String::from("client-1"),
+                secret: String::from("new-secret"),
+                guild_id: String::from("111"),
+                reachable_url: Some(String::from("https://client.example")),
+            },
+            SnapshotClientRow {
+                client_id: String::from("client-1"),
+                secret: String::from("old-secret"),
+                guild_id: String::from("222"),
+                reachable_url: Some(String::from("https://stale.example")),
+            },
+            SnapshotClientRow {
+                client_id: String::from("client-1"),
+                secret: String::from("new-secret"),
+                guild_id: String::from("333"),
+                reachable_url: None,
+            },
+        ]);
+
+        let client = clients.get("client-1").expect("client exists");
+        assert_eq!(client.secret, "new-secret");
+        assert_eq!(client.guilds.len(), 2);
+        assert!(client.guilds.contains(&111));
+        assert!(client.guilds.contains(&333));
+        assert!(!client.guilds.contains(&222));
+        assert_eq!(
+            client.reachable_url.as_deref(),
+            Some("https://client.example")
+        );
+    }
 }

@@ -15,13 +15,12 @@ use std::{
 };
 
 use crate::{
-    db_config::CLIENTS,
     config::CONFIG,
+    db_config::CLIENTS,
     deserializer::{EventTypeInfo, GatewayEvent, SequenceInfo},
     model::Ready,
     state::{BufferedClientEvent, Shard as ShardState, State},
-    wake,
-    SHUTDOWN,
+    wake, SHUTDOWN,
 };
 
 /// (payload, sequence_info, guild_id)
@@ -196,7 +195,12 @@ pub async fn events(
                 let _res = broadcast_tx.send((payload_copy.clone(), sequence.clone(), guild_id));
 
                 if should_buffer_event(event_name) {
-                    buffer_event_for_disconnected_clients(&state, &payload_copy, sequence, guild_id);
+                    buffer_event_for_disconnected_clients(
+                        &state,
+                        &payload_copy,
+                        sequence,
+                        guild_id,
+                    );
                 }
             }
         }
