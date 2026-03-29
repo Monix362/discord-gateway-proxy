@@ -22,7 +22,7 @@ use tokio::{
         oneshot,
     },
 };
-use tokio_websockets::{Error, Limits, Message, ServerBuilder};
+use tokio_websockets::{CloseCode, Error, Limits, Message, ServerBuilder};
 use tracing::{debug, error, info, trace, warn};
 
 use std::{collections::HashSet, convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
@@ -322,7 +322,7 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
     // Write all messages from a queue to the sink
     let (stream_writer, stream_receiver) = unbounded_channel::<Message>();
 
-    let sink_task = tokio::spawn(sink_from_queue(
+    let mut sink_task = tokio::spawn(sink_from_queue(
         addr,
         use_zlib,
         compress_rx,
@@ -332,6 +332,10 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
 
     let mut shard_forward_task = None;
     let mut active_client_id: Option<String> = None;
+    // When true, teardown awaits sink_task flush instead of aborting immediately.
+    // Set when we send INVALID_SESSION + close frame and need the client to
+    // receive them before the connection drops.
+    let mut graceful_close = false;
 
     while let Some(Ok(msg)) = stream.next().await {
         if !msg.is_text() && !msg.is_binary() {
@@ -462,7 +466,13 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                             resume.d.session_id
                         );
                         let _res = stream_writer.send(Message::text(INVALID_SESSION.to_string()));
-                        continue;
+                        // Close with 4007 (InvalidSeq) so discord.js does a fresh IDENTIFY
+                        let _res = stream_writer.send(Message::close(
+                            Some(CloseCode::try_from(4007u16).unwrap()),
+                            "session rejected",
+                        ));
+                        graceful_close = true;
+                        break;
                     }
 
                     let session_id = resume.d.session_id;
@@ -501,9 +511,24 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
                         let _res = sender.send(session.compress);
                     } else {
                         let _res = stream_writer.send(Message::text(INVALID_SESSION.to_string()));
+                        let _res = stream_writer.send(Message::close(
+                            Some(CloseCode::try_from(4007u16).unwrap()),
+                            "session rejected",
+                        ));
+                        graceful_close = true;
+                        break;
                     }
                 } else {
                     let _res = stream_writer.send(Message::text(INVALID_SESSION.to_string()));
+                    // Close with 4007 (InvalidSeq) so discord.js does a fresh IDENTIFY.
+                    // This is the hot path after a proxy restart: all in-memory sessions
+                    // are lost, so every RESUME attempt hits this branch.
+                    let _res = stream_writer.send(Message::close(
+                        Some(CloseCode::try_from(4007u16).unwrap()),
+                        "session not found",
+                    ));
+                    graceful_close = true;
+                    break;
                 }
             }
             _ => {
@@ -519,7 +544,27 @@ pub async fn handle_client<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
 
     debug!("[{addr}] Client disconnected");
 
-    sink_task.abort();
+    if graceful_close {
+        // Stop the event producer first so it doesn't keep enqueuing payloads
+        // through its stream_writer clone, which would delay the sink drain
+        // or push the close frame further back in the queue.
+        if let Some(task) = shard_forward_task.take() {
+            task.abort();
+        }
+        // Drop the writer so the sink task sees the channel close after
+        // draining queued messages (INVALID_SESSION + close frame).
+        drop(stream_writer);
+        // Give the sink task up to 2s to flush before force-aborting.
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut sink_task)
+            .await
+            .is_err()
+        {
+            warn!("[{addr}] Sink task did not flush within 2s, aborting");
+            sink_task.abort();
+        }
+    } else {
+        sink_task.abort();
+    }
 
     if let Some(shard_forward_task) = shard_forward_task {
         shard_forward_task.abort();
