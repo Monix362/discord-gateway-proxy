@@ -35,6 +35,7 @@ impl Ready {
         Self { tx, rx }
     }
 
+    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         self.rx.borrow().is_some()
     }

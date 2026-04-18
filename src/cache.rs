@@ -41,7 +41,7 @@ impl Guilds {
     }
 
     pub fn update(&self, value: impl UpdateCache<DefaultCacheModels>) {
-        self.0.update(value);
+        self.0.update(&value);
     }
 
     #[allow(clippy::missing_const_for_fn)]
@@ -114,20 +114,8 @@ impl Guilds {
                 if !is_authorized(guild.id()) {
                     return None;
                 }
-                if guild.unavailable() == Some(true) {
-                    // Will be part of unavailable_guilds iterator
-                    None
-                } else {
-                    Some(guild_id_to_json(guild.id()))
-                }
+                Some(guild_id_to_json(guild.id()))
             })
-            .chain(
-                self.0
-                    .iter()
-                    .unavailable_guilds()
-                    .filter(|guild_id| is_authorized(*guild_id))
-                    .map(guild_id_to_json),
-            )
             .collect();
 
         ready.insert(String::from("guilds"), OwnedValue::Array(guilds.into()));
@@ -405,8 +393,17 @@ impl Guilds {
                     let guild_channels = self.channels_in_guild(guild.id());
                     let presences = self.presences_in_guild(guild.id());
                     let emojis = self.emojis_in_guild(guild.id());
-                    let members = self.members_in_guild(guild.id());
                     let roles = self.roles_in_guild(guild.id());
+                    let valid_role_ids: HashSet<Id<_>> =
+                        roles.iter().map(|r| r.id).collect();
+                    let members = self
+                        .members_in_guild(guild.id())
+                        .into_iter()
+                        .map(|mut m| {
+                            m.roles.retain(|id| valid_role_ids.contains(id));
+                            m
+                        })
+                        .collect();
                     let scheduled_events = self.scheduled_events_in_guild(guild.id());
                     let stage_instances = self.stage_instances_in_guild(guild.id());
                     let stickers = self.stickers_in_guild(guild.id());

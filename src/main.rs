@@ -10,7 +10,6 @@
 use metrics_exporter_prometheus::PrometheusBuilder;
 use mimalloc::MiMalloc;
 use tokio::{
-    signal::unix::{signal, SignalKind},
     sync::broadcast,
     task::JoinSet,
     time::timeout,
@@ -260,12 +259,20 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     });
 
-    let mut sigint = signal(SignalKind::interrupt()).unwrap();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
-
-    tokio::select! {
-        _ = sigint.recv() => info!("received SIGINT, shutting down"),
-        _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = signal(SignalKind::interrupt()).unwrap();
+        let mut sigterm = signal(SignalKind::terminate()).unwrap();
+        tokio::select! {
+            _ = sigint.recv() => info!("received SIGINT, shutting down"),
+            _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.unwrap();
+        info!("received Ctrl+C, shutting down");
     }
 
     // Set the flag so that event handlers will be able to tell that a GatewayClose is an expected shutdown
@@ -303,6 +310,10 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     if let Err(e) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

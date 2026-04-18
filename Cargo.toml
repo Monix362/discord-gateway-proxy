@@ -64,16 +64,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "std",
 ] }
-twilight-cache-inmemory = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false }
-twilight-gateway = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
+twilight-cache-inmemory = { git = "https://github.com/twilight-rs/twilight.git", default-features = false }
+twilight-gateway = { git = "https://github.com/twilight-rs/twilight.git", default-features = false, features = [
     "rustls-webpki-roots",
 ] }
-twilight-gateway-queue = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
-] }
-twilight-http = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated", default-features = false, features = [
+twilight-gateway-queue = { git = "https://github.com/twilight-rs/twilight.git", default-features = false }
+twilight-http = { git = "https://github.com/twilight-rs/twilight.git", default-features = false, features = [
     "rustls-webpki-roots",
 ] }
-twilight-model = { git = "https://github.com/remorses/twilight.git", branch = "0.16-updated" }
+twilight-model = { git = "https://github.com/twilight-rs/twilight.git" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = { version = "0.11", default-features = false, features = ["stream"] }

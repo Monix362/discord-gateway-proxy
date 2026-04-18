@@ -169,6 +169,10 @@ impl From<Cache> for EventTypeFlags {
             flags |= Self::MEMBER_ADD | Self::MEMBER_REMOVE | Self::MEMBER_UPDATE;
         }
 
+        if cache.members {
+            flags |= Self::MEMBER_CHUNK;
+        }
+
         if cache.roles {
             flags |= Self::ROLE_CREATE | Self::ROLE_DELETE | Self::ROLE_UPDATE;
         }
@@ -226,11 +230,11 @@ impl From<Cache> for ResourceType {
         }
 
         if cache.current_member {
-            resource_types |= Self::MEMBER_CURRENT;
+            resource_types |= Self::MEMBER;
         }
 
         if cache.members {
-            resource_types |= Self::MEMBER;
+            resource_types |= Self::MEMBER | Self::USER;
         }
 
         if cache.presences {
