@@ -267,13 +267,14 @@ async fn forward_shard(
     loop {
         let res = event_receiver.recv().await;
 
-        if let Ok((mut payload, sequence, guild_id)) = res {
+        if let Ok((payload_arc, sequence, guild_id)) = res {
             // Filter by authorized guilds if specified
             if let Some(ref guilds) = authorized_guilds {
                 match guild_id {
                     Some(gid) => {
                         if !guilds.contains(&gid) {
-                            // Event is for a guild this client isn't authorized for
+                            // Event is for a guild this client isn't authorized for —
+                            // Arc dropped cheaply, no String copy needed.
                             continue;
                         }
                     }
@@ -285,11 +286,15 @@ async fn forward_shard(
                 }
             }
 
-            // Overwrite the sequence number
-            if let Some(SequenceInfo(_, sequence_range)) = sequence {
+            // Overwrite the sequence number — clone only when we need to mutate.
+            let payload = if let Some(SequenceInfo(_, sequence_range)) = sequence {
                 seq += 1;
-                payload.replace_range(sequence_range, buffer.format(seq));
-            }
+                let mut s = Arc::unwrap_or_clone(payload_arc);
+                s.replace_range(sequence_range, buffer.format(seq));
+                s
+            } else {
+                Arc::unwrap_or_clone(payload_arc)
+            };
 
             let _res = stream_writer.send(Message::text(payload));
         } else if let Err(RecvError::Lagged(amt)) = res {

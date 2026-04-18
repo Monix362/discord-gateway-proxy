@@ -25,7 +25,8 @@ use crate::{
 
 /// (payload, sequence_info, guild_id)
 /// guild_id is None for events without a guild context (USER_UPDATE, DMs, etc.)
-pub type BroadcastMessage = (String, Option<SequenceInfo>, Option<u64>);
+/// Arc<String> avoids cloning the payload string for each broadcast subscriber.
+pub type BroadcastMessage = (Arc<String>, Option<SequenceInfo>, Option<u64>);
 
 const TEN_SECONDS: Duration = Duration::from_secs(10);
 const WAKE_COOLDOWN: Duration = Duration::from_secs(10);
@@ -189,18 +190,13 @@ pub async fn events(
             } else if op.0 == 0 && is_ready {
                 // We only want to relay dispatchable events, not RESUMEs and not READY
                 // because we fake a READY event
-                let payload_copy = payload.clone();
-                trace!("[Shard {shard_id}] Sending payload to clients: {payload_copy:?}",);
+                trace!("[Shard {shard_id}] Sending payload to clients: {payload:?}");
 
-                let _res = broadcast_tx.send((payload_copy.clone(), sequence.clone(), guild_id));
+                let payload_arc = Arc::new(payload.clone());
+                let _res = broadcast_tx.send((payload_arc, sequence.clone(), guild_id));
 
                 if should_buffer_event(event_name) {
-                    buffer_event_for_disconnected_clients(
-                        &state,
-                        &payload_copy,
-                        sequence,
-                        guild_id,
-                    );
+                    buffer_event_for_disconnected_clients(&state, &payload, sequence, guild_id);
                 }
             }
         }
