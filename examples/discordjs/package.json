@@ -1,0 +1,14 @@
+{
+  "name": "gateway-proxy-discordjs-example",
+  "version": "1.0.0",
+  "description": "discord.js bot using gateway-proxy",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@discordjs/ws": "^1.1.1",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}
