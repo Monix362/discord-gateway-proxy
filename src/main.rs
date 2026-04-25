@@ -18,7 +18,6 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, reload, util::SubscriberInitExt,
 };
-use twilight_cache_inmemory::InMemoryCache;
 use twilight_gateway::{CloseFrame, ConfigBuilder, Shard, ShardId};
 use twilight_gateway_queue::InMemoryQueue;
 use twilight_http::Client;
@@ -135,13 +134,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         // we need to make a broadcast channel with the events
         let (broadcast_tx, _) = broadcast::channel(CONFIG.backpressure);
 
-        let cache = Arc::new(
-            InMemoryCache::builder()
-                .resource_types(CONFIG.cache.clone().into())
-                .message_cache_size(0)
-                .build(),
-        );
-        let guild_cache = cache::Guilds::new(cache.clone());
+        let guild_cache = cache::Guilds::new();
 
         let ready = state::Ready::new();
 

@@ -8,8 +8,7 @@ use serde_json::Error as JsonError;
 #[cfg(feature = "simd-json")]
 use simd_json::Error as JsonError;
 use tracing_subscriber::{filter::LevelFilter, reload};
-use twilight_cache_inmemory::ResourceType;
-use twilight_gateway::{EventTypeFlags, Intents};
+use twilight_gateway::Intents;
 use twilight_model::gateway::presence::{Activity, Status};
 
 #[cfg(target_os = "linux")]
@@ -115,158 +114,11 @@ pub struct Config {
     #[serde(default)]
     pub gateway_url: Option<String>,
     pub externally_accessible_url: String,
-    #[serde(default)]
-    pub cache: Cache,
     /// Map of client ID to client configuration.
     /// Clients authenticate using their ID and secret in the IDENTIFY token field.
     /// Format: "client_id:client_secret" or just use the bot token for legacy behavior.
     #[serde(default)]
     pub clients: HashMap<String, ClientConfig>,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Cache {
-    pub channels: bool,
-    pub presences: bool,
-    pub emojis: bool,
-    pub current_member: bool,
-    pub members: bool,
-    pub roles: bool,
-    pub scheduled_events: bool,
-    pub stage_instances: bool,
-    pub stickers: bool,
-    pub users: bool,
-    pub voice_states: bool,
-}
-
-impl Default for Cache {
-    fn default() -> Self {
-        Self {
-            channels: true,
-            presences: false,
-            current_member: true,
-            emojis: false,
-            members: false,
-            roles: true,
-            scheduled_events: false,
-            stage_instances: false,
-            stickers: false,
-            users: false,
-            voice_states: false,
-        }
-    }
-}
-
-impl From<Cache> for EventTypeFlags {
-    fn from(cache: Cache) -> Self {
-        let mut flags = Self::GUILD_CREATE
-            | Self::GUILD_DELETE
-            | Self::GUILD_UPDATE
-            | Self::READY
-            | Self::GATEWAY_INVALIDATE_SESSION;
-
-        if cache.members || cache.current_member {
-            flags |= Self::MEMBER_ADD | Self::MEMBER_REMOVE | Self::MEMBER_UPDATE;
-        }
-
-        if cache.members {
-            flags |= Self::MEMBER_CHUNK;
-        }
-
-        if cache.roles {
-            flags |= Self::ROLE_CREATE | Self::ROLE_DELETE | Self::ROLE_UPDATE;
-        }
-
-        if cache.channels {
-            flags |= Self::CHANNEL_CREATE
-                | Self::CHANNEL_DELETE
-                | Self::CHANNEL_UPDATE
-                | Self::THREAD_CREATE
-                | Self::THREAD_DELETE
-                | Self::THREAD_LIST_SYNC
-                | Self::THREAD_UPDATE;
-        }
-
-        if cache.presences {
-            flags |= Self::PRESENCE_UPDATE;
-        }
-
-        if cache.emojis {
-            flags |= Self::GUILD_EMOJIS_UPDATE;
-        }
-
-        if cache.scheduled_events {
-            flags |= Self::GUILD_SCHEDULED_EVENTS;
-        }
-
-        if cache.stage_instances {
-            flags |= Self::STAGE_INSTANCE_CREATE
-                | Self::STAGE_INSTANCE_DELETE
-                | Self::STAGE_INSTANCE_UPDATE;
-        }
-
-        if cache.voice_states {
-            flags |= Self::VOICE_STATE_UPDATE | Self::VOICE_SERVER_UPDATE;
-        }
-
-        if cache.users {
-            flags |= Self::USER_UPDATE;
-        }
-
-        flags
-    }
-}
-
-impl From<Cache> for ResourceType {
-    fn from(cache: Cache) -> Self {
-        let mut resource_types = Self::GUILD | Self::USER_CURRENT;
-
-        if cache.channels {
-            resource_types |= Self::CHANNEL;
-        }
-
-        if cache.emojis {
-            resource_types |= Self::EMOJI;
-        }
-
-        if cache.current_member {
-            resource_types |= Self::MEMBER;
-        }
-
-        if cache.members {
-            resource_types |= Self::MEMBER | Self::USER;
-        }
-
-        if cache.presences {
-            resource_types |= Self::PRESENCE;
-        }
-
-        if cache.roles {
-            resource_types |= Self::ROLE;
-        }
-
-        if cache.scheduled_events {
-            resource_types |= Self::GUILD_SCHEDULED_EVENT;
-        }
-
-        if cache.stage_instances {
-            resource_types |= Self::STAGE_INSTANCE;
-        }
-
-        if cache.stickers {
-            resource_types |= Self::STICKER;
-        }
-
-        if cache.users {
-            resource_types |= Self::USER;
-        }
-
-        if cache.voice_states {
-            resource_types |= Self::VOICE_STATE;
-        }
-
-        resource_types
-    }
 }
 
 fn default_log_level() -> String {

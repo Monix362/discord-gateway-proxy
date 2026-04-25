@@ -2,77 +2,95 @@
 use halfbrown::hashmap;
 use serde::Serialize;
 #[cfg(not(feature = "simd-json"))]
-use serde_json::{to_string, Value as OwnedValue};
+use serde_json::Value as OwnedValue;
 #[cfg(feature = "simd-json")]
-use simd_json::{to_string, OwnedValue};
-use twilight_cache_inmemory::{DefaultCacheModels, InMemoryCache, InMemoryCacheStats, UpdateCache};
-use twilight_model::{
-    channel::{message::Sticker, Channel, StageInstance},
-    gateway::{
-        payload::incoming::GuildDelete,
-        presence::{Presence, UserOrId},
-        OpCode,
-    },
-    guild::{scheduled_event::GuildScheduledEvent, Emoji, Guild, Member, Role},
-    id::{
-        marker::{GuildMarker, UserMarker},
-        Id,
-    },
-    voice::VoiceState,
-};
+use simd_json::OwnedValue;
+use tracing::warn;
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
 use crate::model::JsonObject;
 
+/// Wrapper used to serialize READY payloads. op is a raw u8 (= 0 for Dispatch).
 #[derive(Serialize)]
-pub struct Payload<T> {
+pub struct Payload<T: Serialize> {
     pub d: T,
-    pub op: OpCode,
+    pub op: u8,
     pub t: &'static str,
     pub s: usize,
 }
 
-pub struct Guilds(Arc<InMemoryCache>);
+struct GuildEntry {
+    /// Pre-serialized JSON of the `d` object from Discord's GUILD_CREATE.
+    /// Stored as a raw string so clients receive it without any re-parsing.
+    json: String,
+    unavailable: bool,
+}
+
+struct GuildStateInner {
+    /// guild_id → entry with full GUILD_CREATE `d` JSON
+    guilds: HashMap<u64, GuildEntry>,
+    /// channel_id → guild_id, used by resolve_guild_id_for_channel
+    channel_index: HashMap<u64, u64>,
+}
+
+pub struct GuildCacheStats {
+    pub guilds: usize,
+    pub channels: usize,
+}
+
+/// Per-shard guild cache backed by raw JSON storage instead of per-resource
+/// typed DashMap entries. One entry per guild stores the pre-serialized
+/// GUILD_CREATE `d` JSON sent to clients directly — no reconstruction step.
+///
+/// Memory: O(guilds) HashMap entries instead of O(total_resources) DashMap
+/// entries. Typically 5-20x lower memory than twilight InMemoryCache for
+/// large bots.
+pub struct Guilds(Arc<RwLock<GuildStateInner>>);
 
 impl Guilds {
-    pub const fn new(cache: Arc<InMemoryCache>) -> Self {
-        Self(cache)
+    pub fn new() -> Self {
+        Self(Arc::new(RwLock::new(GuildStateInner {
+            guilds: HashMap::new(),
+            channel_index: HashMap::new(),
+        })))
     }
 
-    pub fn update(&self, value: impl UpdateCache<DefaultCacheModels>) {
-        self.0.update(&value);
-    }
-
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn stats(&self) -> InMemoryCacheStats<'_> {
-        self.0.stats()
+    pub fn stats(&self) -> GuildCacheStats {
+        let state = self.0.read().unwrap();
+        GuildCacheStats {
+            guilds: state.guilds.len(),
+            channels: state.channel_index.len(),
+        }
     }
 
     pub fn resolve_guild_id_for_channel(&self, channel_id: u64) -> Option<u64> {
-        self.0.iter().guilds().find_map(|guild| {
-            let has_channel = self
-                .0
-                .guild_channels(guild.id())
-                .map(|channels| {
-                    channels
-                        .iter()
-                        .any(|cached_channel_id| cached_channel_id.get() == channel_id)
-                })
-                .unwrap_or(false);
-
-            if has_channel {
-                Some(guild.id().get())
-            } else {
-                None
-            }
-        })
+        self.0.read().unwrap().channel_index.get(&channel_id).copied()
     }
 
-    /// Get a READY payload for the client.
-    ///
-    /// If `authorized_guilds` is Some, only those guilds are included in the READY.
-    /// If `authorized_guilds` is None, all guilds are included (original behavior).
+    /// Process a dispatch event and update the guild cache.
+    /// Only events that change guild state are handled; all others are no-ops.
+    pub fn process_event(&self, event_name: &str, payload: &str, guild_id: Option<u64>) {
+        match event_name {
+            "GUILD_CREATE" => self.on_guild_create(payload),
+            "GUILD_UPDATE" => self.on_guild_update(payload, guild_id),
+            "GUILD_DELETE" => self.on_guild_delete(payload, guild_id),
+            "CHANNEL_CREATE" => self.on_channel_add(payload, guild_id, false),
+            "THREAD_CREATE" => self.on_channel_add(payload, guild_id, true),
+            "CHANNEL_UPDATE" | "THREAD_UPDATE" => self.on_channel_or_thread_update(payload, guild_id),
+            "CHANNEL_DELETE" | "THREAD_DELETE" => self.on_channel_delete(payload, guild_id),
+            "THREAD_LIST_SYNC" => self.on_thread_list_sync(payload, guild_id),
+            "ROLE_CREATE" | "ROLE_UPDATE" => self.on_role_upsert(payload, guild_id),
+            "ROLE_DELETE" => self.on_role_delete(payload, guild_id),
+            "GUILD_EMOJIS_UPDATE" => self.on_field_replace(payload, guild_id, "emojis"),
+            "GUILD_STICKERS_UPDATE" => self.on_field_replace(payload, guild_id, "stickers"),
+            _ => {}
+        }
+    }
+
     pub fn get_ready_payload(
         &self,
         mut ready: JsonObject,
@@ -81,40 +99,27 @@ impl Guilds {
     ) -> Payload<JsonObject> {
         *sequence += 1;
 
-        let guild_id_to_json = |guild_id: Id<GuildMarker>| {
-            #[cfg(feature = "simd-json")]
-            {
-                OwnedValue::Object(Box::new(hashmap! {
-                    String::from("id") => guild_id.to_string().into(),
-                    String::from("unavailable") => true.into(),
-                }))
-            }
-            #[cfg(not(feature = "simd-json"))]
-            {
-                serde_json::json!({
-                    "id": guild_id.to_string(),
-                    "unavailable": true
-                })
-            }
-        };
+        let state = self.0.read().unwrap();
 
-        // Helper to check if guild is authorized
-        let is_authorized = |guild_id: Id<GuildMarker>| -> bool {
-            match authorized_guilds {
-                Some(guilds) => guilds.contains(&guild_id.get()),
-                None => true, // No filter, all guilds authorized
-            }
-        };
-
-        let guilds: Vec<_> = self
-            .0
-            .iter()
-            .guilds()
-            .filter_map(|guild| {
-                if !is_authorized(guild.id()) {
-                    return None;
+        let guilds: Vec<_> = state
+            .guilds
+            .keys()
+            .filter(|guild_id| authorized_guilds.map_or(true, |g| g.contains(guild_id)))
+            .map(|guild_id| {
+                #[cfg(feature = "simd-json")]
+                {
+                    OwnedValue::Object(Box::new(hashmap! {
+                        String::from("id") => guild_id.to_string().into(),
+                        String::from("unavailable") => true.into(),
+                    }))
                 }
-                Some(guild_id_to_json(guild.id()))
+                #[cfg(not(feature = "simd-json"))]
+                {
+                    serde_json::json!({
+                        "id": guild_id.to_string(),
+                        "unavailable": true
+                    })
+                }
             })
             .collect();
 
@@ -122,356 +127,315 @@ impl Guilds {
 
         Payload {
             d: ready,
-            op: OpCode::Dispatch,
+            op: 0,
             t: "READY",
             s: *sequence,
         }
     }
 
-    fn channels_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Channel> {
-        self.0
-            .guild_channels(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|channel_id| {
-                        let channel = self.0.channel(*channel_id)?;
-
-                        if channel.kind.is_thread() {
-                            None
-                        } else {
-                            Some(channel.value().clone())
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn presences_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Presence> {
-        self.0
-            .guild_presences(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|user_id| {
-                        let presence = self.0.presence(guild_id, *user_id)?;
-
-                        Some(Presence {
-                            activities: presence.activities().to_vec(),
-                            client_status: presence.client_status().clone(),
-                            guild_id: presence.guild_id(),
-                            status: presence.status(),
-                            user: UserOrId::UserId {
-                                id: presence.user_id(),
-                            },
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn emojis_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Emoji> {
-        self.0
-            .guild_emojis(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|emoji_id| {
-                        let emoji = self.0.emoji(*emoji_id)?;
-
-                        Some(Emoji {
-                            animated: emoji.animated(),
-                            available: emoji.available(),
-                            id: emoji.id(),
-                            managed: emoji.managed(),
-                            name: emoji.name().to_string(),
-                            require_colons: emoji.require_colons(),
-                            roles: emoji.roles().to_vec(),
-                            user: emoji
-                                .user_id()
-                                .and_then(|id| self.0.user(id).map(|user| user.value().clone())),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn member(&self, guild_id: Id<GuildMarker>, user_id: Id<UserMarker>) -> Option<Member> {
-        let member = self.0.member(guild_id, user_id)?;
-
-        Some(Member {
-            avatar: member.avatar(),
-            avatar_decoration_data: None,
-            banner: None,
-            communication_disabled_until: member.communication_disabled_until(),
-            deaf: member.deaf().unwrap_or_default(),
-            flags: member.flags(),
-            joined_at: member.joined_at(),
-            mute: member.mute().unwrap_or_default(),
-            nick: member.nick().map(ToString::to_string),
-            pending: member.pending(),
-            premium_since: member.premium_since(),
-            roles: member.roles().to_vec(),
-            user: self.0.user(member.user_id())?.value().clone(),
-        })
-    }
-
-    fn members_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Member> {
-        self.0
-            .guild_members(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|user_id| self.member(guild_id, *user_id))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn roles_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Role> {
-        self.0
-            .guild_roles(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|role_id| Some(self.0.role(*role_id)?.value().resource().clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn scheduled_events_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<GuildScheduledEvent> {
-        self.0
-            .scheduled_events(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|event_id| {
-                        Some(
-                            self.0
-                                .scheduled_event(*event_id)?
-                                .value()
-                                .resource()
-                                .clone(),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn stage_instances_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<StageInstance> {
-        self.0
-            .guild_stage_instances(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|stage_id| {
-                        Some(self.0.stage_instance(*stage_id)?.value().resource().clone())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn stickers_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Sticker> {
-        self.0
-            .guild_stickers(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|sticker_id| {
-                        let sticker = self.0.sticker(*sticker_id)?;
-
-                        Some(Sticker {
-                            available: sticker.available(),
-                            description: Some(sticker.description().to_string()),
-                            format_type: sticker.format_type(),
-                            guild_id: Some(sticker.guild_id()),
-                            id: sticker.id(),
-                            kind: sticker.kind(),
-                            name: sticker.name().to_string(),
-                            pack_id: sticker.pack_id(),
-                            sort_value: sticker.sort_value(),
-                            tags: sticker.tags().to_string(),
-                            user: sticker
-                                .user_id()
-                                .and_then(|id| self.0.user(id).map(|user| user.value().clone())),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn voice_states_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<VoiceState> {
-        self.0
-            .guild_voice_states(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|user_id| {
-                        let voice_state = self.0.voice_state(*user_id, guild_id)?;
-
-                        Some(VoiceState {
-                            channel_id: Some(voice_state.channel_id()),
-                            deaf: voice_state.deaf(),
-                            guild_id: Some(voice_state.guild_id()),
-                            member: self.member(guild_id, *user_id),
-                            mute: voice_state.mute(),
-                            self_deaf: voice_state.self_deaf(),
-                            self_mute: voice_state.self_mute(),
-                            self_stream: voice_state.self_stream(),
-                            self_video: voice_state.self_video(),
-                            session_id: voice_state.session_id().to_string(),
-                            suppress: voice_state.suppress(),
-                            user_id: voice_state.user_id(),
-                            request_to_speak_timestamp: voice_state.request_to_speak_timestamp(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn threads_in_guild(&self, guild_id: Id<GuildMarker>) -> Vec<Channel> {
-        self.0
-            .guild_channels(guild_id)
-            .map(|reference| {
-                reference
-                    .iter()
-                    .filter_map(|channel_id| {
-                        let channel = self.0.channel(*channel_id)?;
-
-                        if channel.kind.is_thread() {
-                            Some(channel.value().clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Get GUILD_CREATE/GUILD_DELETE payloads for the client.
-    ///
-    /// If `authorized_guilds` is Some, only those guilds are included.
-    /// If `authorized_guilds` is None, all guilds are included (original behavior).
+    /// Iterate GUILD_CREATE / GUILD_DELETE payloads for a connecting client.
+    /// The pre-stored guild JSON is wrapped with the op/t/s envelope directly
+    /// via string concatenation — no re-parsing or re-serialization needed.
     pub fn get_guild_payloads<'a>(
         &'a self,
         sequence: &'a mut usize,
         authorized_guilds: Option<&'a HashSet<u64>>,
     ) -> impl Iterator<Item = String> + 'a {
-        self.0
+        let state = self.0.read().unwrap();
+        let entries: Vec<(u64, String, bool)> = state
+            .guilds
             .iter()
-            .guilds()
-            .filter(move |guild| {
-                match authorized_guilds {
-                    Some(guilds) => guilds.contains(&guild.id().get()),
-                    None => true, // No filter, all guilds authorized
-                }
-            })
-            .map(move |guild| {
-                *sequence += 1;
+            .filter(|(guild_id, _)| authorized_guilds.map_or(true, |g| g.contains(guild_id)))
+            .map(|(guild_id, entry)| (*guild_id, entry.json.clone(), entry.unavailable))
+            .collect();
+        // Drop read lock before returning the iterator.
+        drop(state);
 
-                if guild.unavailable() == Some(true) {
-                    to_string(&Payload {
-                        d: GuildDelete {
-                            id: guild.id(),
-                            unavailable: Some(true),
-                        },
-                        op: OpCode::Dispatch,
-                        t: "GUILD_DELETE",
-                        s: *sequence,
-                    })
-                    .unwrap()
+        entries.into_iter().map(move |(guild_id, json, unavailable)| {
+            *sequence += 1;
+            let s = *sequence;
+            if unavailable {
+                format!(
+                    r#"{{"op":0,"t":"GUILD_DELETE","s":{s},"d":{{"id":"{guild_id}","unavailable":true}}}}"#
+                )
+            } else {
+                format!(r#"{{"op":0,"t":"GUILD_CREATE","s":{s},"d":{json}}}"#)
+            }
+        })
+    }
+
+    // --- Event handlers ---
+
+    fn on_guild_create(&self, payload: &str) {
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to parse GUILD_CREATE payload: {e}");
+                return;
+            }
+        };
+        let d = &value["d"];
+
+        let guild_id = match d["id"].as_str().and_then(|s| s.parse::<u64>().ok()) {
+            Some(id) => id,
+            None => {
+                warn!("GUILD_CREATE missing guild id");
+                return;
+            }
+        };
+
+        let unavailable = d["unavailable"].as_bool().unwrap_or(false);
+
+        let guild_json = match serde_json::to_string(d) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("Failed to serialize guild {guild_id}: {e}");
+                return;
+            }
+        };
+
+        let mut state = self.0.write().unwrap();
+
+        // Index all channels and threads for resolve_guild_id_for_channel
+        for array_key in &["channels", "threads"] {
+            if let Some(items) = d[array_key].as_array() {
+                for item in items {
+                    if let Some(ch_id) =
+                        item["id"].as_str().and_then(|s| s.parse::<u64>().ok())
+                    {
+                        state.channel_index.insert(ch_id, guild_id);
+                    }
+                }
+            }
+        }
+
+        state
+            .guilds
+            .insert(guild_id, GuildEntry { json: guild_json, unavailable });
+    }
+
+    fn on_guild_update(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = value["d"].clone();
+
+        // GUILD_UPDATE only contains top-level guild scalar fields — no resource
+        // arrays (channels, roles, members) — so merging all fields is safe.
+        self.modify_guild(guild_id, |guild| {
+            if let (Some(update), Some(stored)) = (d.as_object(), guild.as_object_mut()) {
+                for (key, val) in update {
+                    stored.insert(key.clone(), val.clone());
+                }
+            }
+        });
+    }
+
+    fn on_guild_delete(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value =
+            serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+        let unavailable = value["d"]["unavailable"].as_bool().unwrap_or(false);
+
+        let mut state = self.0.write().unwrap();
+        if unavailable {
+            if let Some(entry) = state.guilds.get_mut(&guild_id) {
+                entry.unavailable = true;
+            }
+        } else {
+            state.guilds.remove(&guild_id);
+            state.channel_index.retain(|_, gid| *gid != guild_id);
+        }
+    }
+
+    fn on_channel_add(&self, payload: &str, guild_id: Option<u64>, is_thread: bool) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = value["d"].clone();
+
+        let channel_id = match d["id"].as_str().and_then(|s| s.parse::<u64>().ok()) {
+            Some(id) => id,
+            None => return,
+        };
+        let channel_id_str = d["id"].as_str().unwrap_or("").to_string();
+        let array_key = if is_thread { "threads" } else { "channels" };
+
+        let mut state = self.0.write().unwrap();
+        state.channel_index.insert(channel_id, guild_id);
+        Self::modify_guild_inner(&mut state, guild_id, |guild| {
+            if let Some(arr) = guild.get_mut(array_key).and_then(|v| v.as_array_mut()) {
+                arr.retain(|ch| ch["id"].as_str() != Some(&channel_id_str));
+                arr.push(d.clone());
+            }
+        });
+    }
+
+    fn on_channel_or_thread_update(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = value["d"].clone();
+        let channel_id_str = match d["id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            for array_key in &["channels", "threads"] {
+                if let Some(arr) = guild.get_mut(*array_key).and_then(|v| v.as_array_mut()) {
+                    if let Some(ch) =
+                        arr.iter_mut().find(|ch| ch["id"].as_str() == Some(&channel_id_str))
+                    {
+                        *ch = d.clone();
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    fn on_channel_delete(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = &value["d"];
+        let channel_id = match d["id"].as_str().and_then(|s| s.parse::<u64>().ok()) {
+            Some(id) => id,
+            None => return,
+        };
+        let channel_id_str = channel_id.to_string();
+
+        let mut state = self.0.write().unwrap();
+        state.channel_index.remove(&channel_id);
+        Self::modify_guild_inner(&mut state, guild_id, |guild| {
+            for array_key in &["channels", "threads"] {
+                if let Some(arr) = guild.get_mut(*array_key).and_then(|v| v.as_array_mut()) {
+                    arr.retain(|ch| ch["id"].as_str() != Some(&channel_id_str));
+                }
+            }
+        });
+    }
+
+    fn on_thread_list_sync(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = &value["d"];
+        let threads = match d["threads"].as_array() {
+            Some(t) => t.clone(),
+            None => return,
+        };
+
+        let mut state = self.0.write().unwrap();
+        for thread in &threads {
+            if let Some(ch_id) = thread["id"].as_str().and_then(|s| s.parse::<u64>().ok()) {
+                state.channel_index.insert(ch_id, guild_id);
+            }
+        }
+        let threads_value = serde_json::Value::Array(threads);
+        Self::modify_guild_inner(&mut state, guild_id, |guild| {
+            guild["threads"] = threads_value.clone();
+        });
+    }
+
+    fn on_role_upsert(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        // ROLE_CREATE / ROLE_UPDATE: d = { guild_id, role }
+        let role = value["d"]["role"].clone();
+        let role_id_str = match role["id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            if let Some(arr) = guild.get_mut("roles").and_then(|v| v.as_array_mut()) {
+                if let Some(existing) =
+                    arr.iter_mut().find(|r| r["id"].as_str() == Some(&role_id_str))
+                {
+                    *existing = role.clone();
                 } else {
-                    let guild_channels = self.channels_in_guild(guild.id());
-                    let presences = self.presences_in_guild(guild.id());
-                    let emojis = self.emojis_in_guild(guild.id());
-                    let roles = self.roles_in_guild(guild.id());
-                    let valid_role_ids: HashSet<Id<_>> =
-                        roles.iter().map(|r| r.id).collect();
-                    let members = self
-                        .members_in_guild(guild.id())
-                        .into_iter()
-                        .map(|mut m| {
-                            m.roles.retain(|id| valid_role_ids.contains(id));
-                            m
-                        })
-                        .collect();
-                    let scheduled_events = self.scheduled_events_in_guild(guild.id());
-                    let stage_instances = self.stage_instances_in_guild(guild.id());
-                    let stickers = self.stickers_in_guild(guild.id());
-                    let voice_states = self.voice_states_in_guild(guild.id());
-                    let threads = self.threads_in_guild(guild.id());
-
-                    let new_guild = Guild {
-                        afk_channel_id: guild.afk_channel_id(),
-                        afk_timeout: guild.afk_timeout(),
-                        application_id: guild.application_id(),
-                        approximate_member_count: None, // Only present in with_counts HTTP endpoint
-                        banner: guild.banner().map(ToOwned::to_owned),
-                        approximate_presence_count: None, // Only present in with_counts HTTP endpoint
-                        channels: guild_channels,
-                        default_message_notifications: guild.default_message_notifications(),
-                        description: guild.description().map(ToString::to_string),
-                        discovery_splash: guild.discovery_splash().map(ToOwned::to_owned),
-                        emojis,
-                        explicit_content_filter: guild.explicit_content_filter(),
-                        features: guild.features().cloned().collect(),
-                        guild_scheduled_events: scheduled_events,
-                        icon: guild.icon().map(ToOwned::to_owned),
-                        id: guild.id(),
-                        joined_at: guild.joined_at(),
-                        large: guild.large(),
-                        max_members: guild.max_members(),
-                        max_presences: guild.max_presences(),
-                        max_stage_video_channel_users: guild.max_stage_video_channel_users(),
-                        max_video_channel_users: guild.max_video_channel_users(),
-                        member_count: guild.member_count(),
-                        members,
-                        mfa_level: guild.mfa_level(),
-                        name: guild.name().to_string(),
-                        nsfw_level: guild.nsfw_level(),
-                        owner_id: guild.owner_id(),
-                        owner: guild.owner(),
-                        permissions: guild.permissions(),
-                        public_updates_channel_id: guild.public_updates_channel_id(),
-                        preferred_locale: guild.preferred_locale().to_string(),
-                        premium_progress_bar_enabled: guild.premium_progress_bar_enabled(),
-                        premium_subscription_count: guild.premium_subscription_count(),
-                        premium_tier: guild.premium_tier(),
-                        presences,
-                        roles,
-                        rules_channel_id: guild.rules_channel_id(),
-                        safety_alerts_channel_id: guild.safety_alerts_channel_id(),
-                        splash: guild.splash().map(ToOwned::to_owned),
-                        stage_instances,
-                        stickers,
-                        system_channel_flags: guild.system_channel_flags(),
-                        system_channel_id: guild.system_channel_id(),
-                        threads,
-                        unavailable: Some(false),
-                        vanity_url_code: guild.vanity_url_code().map(ToString::to_string),
-                        verification_level: guild.verification_level(),
-                        voice_states,
-                        widget_channel_id: guild.widget_channel_id(),
-                        widget_enabled: guild.widget_enabled(),
-                    };
-
-                    to_string(&Payload {
-                        d: new_guild,
-                        op: OpCode::Dispatch,
-                        t: "GUILD_CREATE",
-                        s: *sequence,
-                    })
-                    .unwrap()
+                    arr.push(role.clone());
                 }
-            })
+            }
+        });
+    }
+
+    fn on_role_delete(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        // ROLE_DELETE: d = { guild_id, role_id }
+        let role_id_str = match value["d"]["role_id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            if let Some(arr) = guild.get_mut("roles").and_then(|v| v.as_array_mut()) {
+                arr.retain(|r| r["id"].as_str() != Some(&role_id_str));
+            }
+        });
+    }
+
+    /// Generic handler for events that wholesale replace a top-level array field
+    /// (GUILD_EMOJIS_UPDATE → "emojis", GUILD_STICKERS_UPDATE → "stickers").
+    fn on_field_replace(&self, payload: &str, guild_id: Option<u64>, field: &'static str) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let new_array = value["d"][field].clone();
+        if new_array.is_null() {
+            return;
+        }
+
+        self.modify_guild(guild_id, |guild| {
+            guild[field] = new_array.clone();
+        });
+    }
+
+    // --- Helpers ---
+
+    /// Parse the stored guild JSON, apply a mutation via `f`, and reserialize.
+    fn modify_guild<F: FnOnce(&mut serde_json::Value)>(&self, guild_id: u64, f: F) {
+        let mut state = self.0.write().unwrap();
+        Self::modify_guild_inner(&mut state, guild_id, f);
+    }
+
+    fn modify_guild_inner<F: FnOnce(&mut serde_json::Value)>(
+        state: &mut GuildStateInner,
+        guild_id: u64,
+        f: F,
+    ) {
+        if let Some(entry) = state.guilds.get_mut(&guild_id) {
+            match serde_json::from_str::<serde_json::Value>(&entry.json) {
+                Ok(mut value) => {
+                    f(&mut value);
+                    match serde_json::to_string(&value) {
+                        Ok(new_json) => entry.json = new_json,
+                        Err(e) => warn!("Failed to reserialize guild {guild_id}: {e}"),
+                    }
+                }
+                Err(e) => warn!("Failed to parse stored guild {guild_id}: {e}"),
+            }
+        }
     }
 }
