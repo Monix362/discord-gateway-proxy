@@ -87,6 +87,7 @@ impl Guilds {
             "ROLE_DELETE" => self.on_role_delete(payload, guild_id),
             "GUILD_EMOJIS_UPDATE" => self.on_field_replace(payload, guild_id, "emojis"),
             "GUILD_STICKERS_UPDATE" => self.on_field_replace(payload, guild_id, "stickers"),
+            "VOICE_STATE_UPDATE" => self.on_voice_state_update(payload, guild_id),
             _ => {}
         }
     }
@@ -390,6 +391,31 @@ impl Guilds {
         self.modify_guild(guild_id, |guild| {
             if let Some(arr) = guild.get_mut("roles").and_then(|v| v.as_array_mut()) {
                 arr.retain(|r| r["id"].as_str() != Some(&role_id_str));
+            }
+        });
+    }
+
+    fn on_voice_state_update(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let d = value["d"].clone();
+        let user_id_str = match d["user_id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+        let left_channel = d["channel_id"].is_null();
+
+        self.modify_guild(guild_id, |guild| {
+            if let Some(arr) = guild.get_mut("voice_states").and_then(|v| v.as_array_mut()) {
+                arr.retain(|vs| vs["user_id"].as_str() != Some(&user_id_str));
+                if !left_channel {
+                    arr.push(d.clone());
+                }
+            } else if !left_channel {
+                guild["voice_states"] = serde_json::Value::Array(vec![d.clone()]);
             }
         });
     }
