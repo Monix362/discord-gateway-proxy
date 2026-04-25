@@ -88,6 +88,8 @@ impl Guilds {
             "GUILD_EMOJIS_UPDATE" => self.on_field_replace(payload, guild_id, "emojis"),
             "GUILD_STICKERS_UPDATE" => self.on_field_replace(payload, guild_id, "stickers"),
             "VOICE_STATE_UPDATE" => self.on_voice_state_update(payload, guild_id),
+            "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => self.on_member_upsert(payload, guild_id),
+            "GUILD_MEMBER_REMOVE" => self.on_member_remove(payload, guild_id),
             _ => {}
         }
     }
@@ -416,6 +418,69 @@ impl Guilds {
                 }
             } else if !left_channel {
                 guild["voice_states"] = serde_json::Value::Array(vec![d.clone()]);
+            }
+        });
+    }
+
+    fn on_member_upsert(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut member = value["d"].clone();
+
+        // Strip guild_id — not present in GUILD_CREATE members array entries.
+        if let Some(obj) = member.as_object_mut() {
+            obj.remove("guild_id");
+        }
+
+        let user_id_str = match member["user"]["id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            // Update members array.
+            if let Some(arr) = guild.get_mut("members").and_then(|v| v.as_array_mut()) {
+                if let Some(existing) =
+                    arr.iter_mut().find(|m| m["user"]["id"].as_str() == Some(&user_id_str))
+                {
+                    *existing = member.clone();
+                } else {
+                    arr.push(member.clone());
+                }
+            }
+            // Refresh member data embedded in their voice state so GUILD_CREATE
+            // replays carry up-to-date nick/roles even without a reconnect.
+            if let Some(vss) = guild.get_mut("voice_states").and_then(|v| v.as_array_mut()) {
+                for vs in vss.iter_mut() {
+                    if vs["user_id"].as_str() == Some(&user_id_str) {
+                        vs["member"] = member.clone();
+                    }
+                }
+            }
+        });
+    }
+
+    fn on_member_remove(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let user_id_str = match value["d"]["user"]["id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            if let Some(arr) = guild.get_mut("members").and_then(|v| v.as_array_mut()) {
+                arr.retain(|m| m["user"]["id"].as_str() != Some(&user_id_str));
+            }
+            // Member left the guild — remove their voice state too.
+            if let Some(arr) = guild.get_mut("voice_states").and_then(|v| v.as_array_mut()) {
+                arr.retain(|vs| vs["user_id"].as_str() != Some(&user_id_str));
             }
         });
     }
