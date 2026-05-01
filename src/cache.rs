@@ -90,6 +90,7 @@ impl Guilds {
             "VOICE_STATE_UPDATE" => self.on_voice_state_update(payload, guild_id),
             "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => self.on_member_upsert(payload, guild_id),
             "GUILD_MEMBER_REMOVE" => self.on_member_remove(payload, guild_id),
+            "GUILD_MEMBERS_CHUNK" => self.on_members_chunk(payload, guild_id),
             _ => {}
         }
     }
@@ -403,21 +404,77 @@ impl Guilds {
             Ok(v) => v,
             Err(_) => return,
         };
-        let d = value["d"].clone();
+        let mut d = value["d"].clone();
         let user_id_str = match d["user_id"].as_str() {
             Some(s) => s.to_string(),
             None => return,
         };
         let left_channel = d["channel_id"].is_null();
 
+        // Strip guild_id — not present in GUILD_CREATE voice_states entries.
+        if let Some(obj) = d.as_object_mut() {
+            obj.remove("guild_id");
+        }
+
         self.modify_guild(guild_id, |guild| {
+            let mut preserved_member = serde_json::Value::Null;
+
             if let Some(arr) = guild.get_mut("voice_states").and_then(|v| v.as_array_mut()) {
-                arr.retain(|vs| vs["user_id"].as_str() != Some(&user_id_str));
+                // Preserve member object from the old entry: VOICE_STATE_UPDATE events
+                // triggered by server-side changes (mute, deaf, speaker) may omit the
+                // member field, which would otherwise erase it from the cached state.
+                arr.retain(|vs| {
+                    if vs["user_id"].as_str() == Some(&user_id_str) {
+                        if !d["member"].is_object() {
+                            preserved_member = vs["member"].clone();
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
                 if !left_channel {
+                    if !d["member"].is_object() && preserved_member.is_object() {
+                        d["member"] = preserved_member;
+                    }
                     arr.push(d.clone());
                 }
             } else if !left_channel {
                 guild["voice_states"] = serde_json::Value::Array(vec![d.clone()]);
+            }
+        });
+    }
+
+    fn on_members_chunk(&self, payload: &str, guild_id: Option<u64>) {
+        let Some(guild_id) = guild_id else { return };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let members = match value["d"]["members"].as_array() {
+            Some(m) => m.clone(),
+            None => return,
+        };
+
+        self.modify_guild(guild_id, |guild| {
+            let arr = match guild.get_mut("members").and_then(|v| v.as_array_mut()) {
+                Some(a) => a,
+                None => {
+                    guild["members"] = serde_json::Value::Array(Vec::new());
+                    guild["members"].as_array_mut().unwrap()
+                }
+            };
+            for member in members {
+                let user_id = member["user"]["id"].as_str().map(str::to_owned);
+                if let Some(uid) = user_id {
+                    if let Some(existing) =
+                        arr.iter_mut().find(|m| m["user"]["id"].as_str() == Some(&uid))
+                    {
+                        *existing = member;
+                    } else {
+                        arr.push(member);
+                    }
+                }
             }
         });
     }
